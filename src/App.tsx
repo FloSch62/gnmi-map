@@ -1,5 +1,6 @@
 import { type CSSProperties, useCallback, useMemo, useState } from 'react';
 import {
+  type NodeChange,
   Background,
   Controls,
   Handle,
@@ -21,6 +22,7 @@ import {
   FileDown,
   Focus,
   GitBranch,
+  RotateCcw,
   Search,
 } from 'lucide-react';
 import {
@@ -48,6 +50,125 @@ const nodeTypes: NodeTypes = {
   schema: SchemaNode,
 };
 
+const nodeHeaderHeight = 36;
+const nodeBodyPadding = 8;
+const nodeBadgeHeight = 24;
+const estimatedFieldRowHeight = 32;
+const layoutGapX = 8;
+const layoutGapY = 18;
+const maxLayoutPasses = 50;
+
+type NodePosition = {
+  x: number;
+  y: number;
+};
+
+type LayoutBox = {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function nodeWidth(node: MapNode): number {
+  const width = node.style?.width;
+
+  if (typeof width === 'number') {
+    return width;
+  }
+
+  if (typeof width === 'string') {
+    const parsedWidth = Number.parseFloat(width);
+    return Number.isFinite(parsedWidth) ? parsedWidth : 320;
+  }
+
+  return 320;
+}
+
+function estimatedNodeHeight(node: MapNode): number {
+  const rows = Math.max(node.data.fields?.length ?? 0, 1);
+  const badgeHeight = node.data.badges?.length ? nodeBadgeHeight : 0;
+
+  return nodeHeaderHeight + badgeHeight + nodeBodyPadding * 2 + rows * estimatedFieldRowHeight;
+}
+
+function boxesOverlap(first: LayoutBox, second: LayoutBox): boolean {
+  return (
+    first.x < second.x + second.width + layoutGapX &&
+    first.x + first.width + layoutGapX > second.x &&
+    first.y < second.y + second.height + layoutGapY &&
+    first.y + first.height + layoutGapY > second.y
+  );
+}
+
+function improveNodeLayout(nodes: MapNode[]): MapNode[] {
+  const boxes = new Map<string, LayoutBox>(
+    nodes.map((node) => [
+      node.id,
+      {
+        id: node.id,
+        x: node.position.x,
+        y: node.position.y,
+        width: nodeWidth(node),
+        height: estimatedNodeHeight(node),
+      },
+    ]),
+  );
+
+  for (let pass = 0; pass < maxLayoutPasses; pass += 1) {
+    let moved = false;
+    const sortedBoxes = [...boxes.values()].sort((first, second) => {
+      if (first.y !== second.y) {
+        return first.y - second.y;
+      }
+
+      return first.x - second.x;
+    });
+
+    for (let index = 0; index < sortedBoxes.length; index += 1) {
+      const anchor = sortedBoxes[index];
+
+      for (let nextIndex = index + 1; nextIndex < sortedBoxes.length; nextIndex += 1) {
+        const candidate = sortedBoxes[nextIndex];
+
+        if (candidate.y >= anchor.y + anchor.height + layoutGapY) {
+          break;
+        }
+
+        if (!boxesOverlap(anchor, candidate)) {
+          continue;
+        }
+
+        const nextY = anchor.y + anchor.height + layoutGapY;
+        if (candidate.y < nextY) {
+          candidate.y = nextY;
+          moved = true;
+        }
+      }
+    }
+
+    if (!moved) {
+      break;
+    }
+  }
+
+  return nodes.map((node) => {
+    const box = boxes.get(node.id);
+    if (!box || (box.x === node.position.x && box.y === node.position.y)) {
+      return node;
+    }
+
+    return {
+      ...node,
+      position: {
+        x: box.x,
+        y: box.y,
+      },
+    };
+  });
+}
+
 function searchableText(node: MapNode): string {
   const fieldText = node.data.fields
     ?.map((field) => `${field.type} ${field.name} ${field.group ?? ''} ${field.badge ?? ''}`)
@@ -72,12 +193,14 @@ function AppShell() {
   const [showExtensions, setShowExtensions] = useState(false);
   const [showDeprecated, setShowDeprecated] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [manualPositions, setManualPositions] = useState<Record<string, NodePosition>>({});
 
   const query = queryValue.trim().toLowerCase();
   const visibleMap = useMemo(
     () => getVisibleMap({ showDeprecated, showExtensions }),
     [showDeprecated, showExtensions],
   );
+  const layoutNodes = useMemo(() => improveNodeLayout(visibleMap.nodes), [visibleMap.nodes]);
 
   const nodeMatches = useMemo(() => {
     if (!query) {
@@ -93,10 +216,14 @@ function AppShell() {
 
   const nodes = useMemo(
     () =>
-      visibleMap.nodes.map((currentNode) => {
+      layoutNodes.map((currentNode) => {
         const active = !query || nodeMatches.has(currentNode.id);
+        const manualPosition = manualPositions[currentNode.id];
+
         return {
           ...currentNode,
+          position: manualPosition ?? currentNode.position,
+          selected: selectedId === currentNode.id,
           data: {
             ...currentNode.data,
             active,
@@ -105,7 +232,7 @@ function AppShell() {
           },
         };
       }),
-    [nodeMatches, query, showExtensions, visibleMap.nodes],
+    [layoutNodes, manualPositions, nodeMatches, query, selectedId, showExtensions],
   );
 
   const edges = useMemo<MapEdge[]>(
@@ -139,6 +266,53 @@ function AppShell() {
     fitView({ padding: 0.12, duration: 450 });
   }, [fitView]);
 
+  const onNodesChange = useCallback((changes: NodeChange<MapNode>[]) => {
+    setManualPositions((currentPositions) => {
+      let nextPositions = currentPositions;
+
+      for (const change of changes) {
+        if (change.type !== 'position' || !change.position) {
+          continue;
+        }
+
+        if (nextPositions === currentPositions) {
+          nextPositions = { ...currentPositions };
+        }
+
+        nextPositions[change.id] = change.position;
+      }
+
+      return nextPositions;
+    });
+
+    setSelectedId((currentSelectedId) => {
+      let selectedNodeWasCleared = false;
+
+      for (const change of changes) {
+        if (change.type !== 'select') {
+          continue;
+        }
+
+        if (change.selected) {
+          return change.id;
+        }
+
+        if (change.id === currentSelectedId) {
+          selectedNodeWasCleared = true;
+        }
+      }
+
+      return selectedNodeWasCleared ? null : currentSelectedId;
+    });
+  }, []);
+
+  const resetLayout = useCallback(() => {
+    setManualPositions({});
+    window.requestAnimationFrame(() => fitView({ padding: 0.12, duration: 450 }));
+  }, [fitView]);
+
+  const hasManualPositions = Object.keys(manualPositions).length > 0;
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -161,6 +335,16 @@ function AppShell() {
           <button className="tool-button" type="button" onClick={fit}>
             <Focus size={16} aria-hidden="true" />
             Fit
+          </button>
+
+          <button
+            className="tool-button"
+            type="button"
+            onClick={resetLayout}
+            disabled={!hasManualPositions}
+          >
+            <RotateCcw size={16} aria-hidden="true" />
+            Reset
           </button>
 
           <button
@@ -195,6 +379,8 @@ function AppShell() {
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}
+          onNodesChange={onNodesChange}
+          nodesDraggable
           minZoom={0.18}
           maxZoom={1.7}
           defaultViewport={{ x: 70, y: 40, zoom: 0.42 }}
