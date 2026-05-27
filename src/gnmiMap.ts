@@ -2926,6 +2926,7 @@ export function getVisibleMap({
   showExtensions = true,
 }: VisibleMapOptions = {}): VisibleMap {
   const visibleNodes = mapNodes
+    .filter((node) => node.data.kind !== 'legend')
     .filter((node) => showDeprecated || !node.data.deprecated)
     .map((node) => ({
       ...node,

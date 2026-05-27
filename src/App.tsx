@@ -1,11 +1,14 @@
-import { type CSSProperties, useCallback, useMemo, useState } from 'react';
+import { type CSSProperties, useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  BaseEdge,
   type NodeChange,
   Background,
   Controls,
+  type Edge,
+  type EdgeProps,
+  type EdgeTypes,
   Handle,
   MarkerType,
-  MiniMap,
   type NodeProps,
   type NodeTypes,
   Position,
@@ -31,10 +34,16 @@ import {
   type MapEdgeKind,
   type MapField,
   type MapNode,
-  type MapNodeKind,
   mapSource,
 } from './gnmiMap';
-import { improveNodeLayout } from './mapLayout';
+import {
+  applyManualPositions,
+  computeReadableNodeLayout,
+  improveNodeLayout,
+  routeReadableLayout,
+  type RoutePoint,
+  type TargetHandleLayout,
+} from './mapLayout';
 
 const edgeStyleByKind: Record<MapEdgeKind, CSSProperties> = {
   rpc: { stroke: '#0b4b8f', strokeWidth: 2.2 },
@@ -51,9 +60,40 @@ const nodeTypes: NodeTypes = {
   schema: SchemaNode,
 };
 
+const edgeTypes: EdgeTypes = {
+  routed: RoutedEdge,
+};
+
 type NodePosition = {
   x: number;
   y: number;
+};
+
+type RoutedEdgeData = Record<string, unknown> & {
+  routePoints: RoutePoint[];
+  routeBridges: RouteBridge[];
+};
+
+type RoutedMapEdge = Edge<RoutedEdgeData, 'routed'> & {
+  sourceHandle: string;
+  targetHandle: string;
+  kind: MapEdgeKind;
+  deprecated: boolean;
+};
+
+type RouteBridge = RoutePoint & {
+  orientation: 'horizontal' | 'vertical';
+};
+
+type RouteSegment = {
+  edgeId: string;
+  index: number;
+  start: RoutePoint;
+  end: RoutePoint;
+  orientation: 'horizontal' | 'vertical';
+  fixed: number;
+  from: number;
+  to: number;
 };
 
 function searchableText(node: MapNode): string {
@@ -75,19 +115,73 @@ function fieldMatches(field: MapField, query: string): boolean {
 }
 
 function AppShell() {
-  const { fitView } = useReactFlow<MapNode, MapEdge>();
+  const { fitView } = useReactFlow<MapNode, RoutedMapEdge>();
   const [queryValue, setQueryValue] = useState('');
   const [showExtensions, setShowExtensions] = useState(false);
   const [showDeprecated, setShowDeprecated] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [manualPositions, setManualPositions] = useState<Record<string, NodePosition>>({});
+  const [routingPositions, setRoutingPositions] = useState<Record<string, NodePosition>>({});
 
   const query = queryValue.trim().toLowerCase();
   const visibleMap = useMemo(
     () => getVisibleMap({ showDeprecated, showExtensions }),
     [showDeprecated, showExtensions],
   );
-  const layoutNodes = useMemo(() => improveNodeLayout(visibleMap.nodes), [visibleMap.nodes]);
+  const fallbackLayoutNodes = useMemo(() => improveNodeLayout(visibleMap.nodes), [visibleMap.nodes]);
+  const [elkLayoutNodes, setElkLayoutNodes] = useState<MapNode[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setElkLayoutNodes(null);
+
+    computeReadableNodeLayout(visibleMap.nodes, visibleMap.edges)
+      .then((layoutNodes) => {
+        if (!cancelled) {
+          setElkLayoutNodes(layoutNodes);
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to compute readable map layout', error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [visibleMap.edges, visibleMap.nodes]);
+
+  const layoutNodes = elkLayoutNodes ?? fallbackLayoutNodes;
+  useEffect(() => {
+    if (!elkLayoutNodes) {
+      return;
+    }
+
+    let secondFrame: number | null = null;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => fitView({ padding: 0.1, duration: 350 }));
+    });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame !== null) {
+        window.cancelAnimationFrame(secondFrame);
+      }
+    };
+  }, [elkLayoutNodes, fitView]);
+
+  const routedLayoutNodes = useMemo(
+    () => applyManualPositions(layoutNodes, routingPositions),
+    [layoutNodes, routingPositions],
+  );
+  const readableLayout = useMemo(
+    () => routeReadableLayout(routedLayoutNodes, visibleMap.edges),
+    [routedLayoutNodes, visibleMap.edges],
+  );
+  const displayedLayoutNodes = useMemo(
+    () => applyManualPositions(readableLayout.nodes, manualPositions),
+    [manualPositions, readableLayout.nodes],
+  );
 
   const nodeMatches = useMemo(() => {
     if (!query) {
@@ -101,47 +195,94 @@ function AppShell() {
     );
   }, [query, visibleMap.nodes]);
 
+  const selectedEdge = useMemo(
+    () => visibleMap.edges.find((edge) => edge.id === selectedEdgeId) ?? null,
+    [selectedEdgeId, visibleMap.edges],
+  );
+  const selectedEdgeEndpointIds = useMemo(
+    () =>
+      selectedEdge ? new Set([selectedEdge.source, selectedEdge.target]) : new Set<string>(),
+    [selectedEdge],
+  );
+
   const nodes = useMemo(
     () =>
-      layoutNodes.map((currentNode) => {
+      displayedLayoutNodes.map((currentNode) => {
         const active = !query || nodeMatches.has(currentNode.id);
-        const manualPosition = manualPositions[currentNode.id];
+        const edgeEndpoint = selectedEdgeEndpointIds.has(currentNode.id);
 
         return {
           ...currentNode,
-          position: manualPosition ?? currentNode.position,
           selected: selectedId === currentNode.id,
           data: {
             ...currentNode.data,
-            active,
+            active: active || edgeEndpoint,
+            edgeEndpoint,
+            activeEdgeSourceHandle:
+              selectedEdge?.source === currentNode.id ? selectedEdge.sourceHandle : null,
             query,
             showExtensions,
           },
         };
       }),
-    [layoutNodes, manualPositions, nodeMatches, query, selectedId, showExtensions],
+    [
+      nodeMatches,
+      displayedLayoutNodes,
+      query,
+      selectedEdge,
+      selectedEdgeEndpointIds,
+      selectedId,
+      showExtensions,
+    ],
   );
 
-  const edges = useMemo<MapEdge[]>(
+  const routeBridgesByEdge = useMemo(
+    () => routeBridges(readableLayout.edges),
+    [readableLayout.edges],
+  );
+
+  const edges = useMemo<RoutedMapEdge[]>(
     () =>
-      visibleMap.edges.map((edge) => {
+      readableLayout.edges.map(({ edge, routePoints, targetHandle }) => {
         const connectedToMatch =
           !query || nodeMatches.has(edge.source) || nodeMatches.has(edge.target);
         const style = edgeStyleByKind[edge.kind] ?? edgeStyleByKind.field;
+        const selected = selectedEdge?.id === edge.id;
+        const selectionDimmed = Boolean(selectedEdge) && !selected;
+        const opacity = connectedToMatch ? (selectionDimmed ? 0.24 : 1) : 0.14;
+        const stroke = selected ? '#d21f3c' : style.stroke;
+        const strokeWidth =
+          typeof style.strokeWidth === 'number'
+            ? style.strokeWidth + (selected ? 1.8 : 0)
+            : style.strokeWidth;
 
         return {
           ...edge,
-          type: 'smoothstep' as const,
-          className: `flow-edge flow-edge-${edge.kind}`,
-          markerEnd: { type: MarkerType.ArrowClosed, color: style.stroke },
-          animated: query ? connectedToMatch : edge.kind === 'rpc',
+          type: 'routed',
+          targetHandle,
+          selected,
+          zIndex: selected ? 12 : 1,
+          interactionWidth: 28,
+          className: [
+            'flow-edge',
+            `flow-edge-${edge.kind}`,
+            selected ? 'is-selected' : '',
+            selectionDimmed ? 'is-dimmed' : '',
+          ]
+            .filter(Boolean)
+            .join(' '),
+          markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
+          animated: selected || (query ? connectedToMatch : edge.kind === 'rpc'),
+          data: { routePoints, routeBridges: routeBridgesByEdge.get(edge.id) ?? [] },
           style: {
             ...style,
-            opacity: connectedToMatch ? 1 : 0.12,
+            opacity,
+            stroke,
+            strokeWidth,
           },
-        };
+        } satisfies RoutedMapEdge;
       }),
-    [nodeMatches, query, visibleMap.edges],
+    [nodeMatches, query, readableLayout.edges, routeBridgesByEdge, selectedEdge],
   );
 
   const selectedNode = useMemo(
@@ -159,6 +300,24 @@ function AppShell() {
 
       for (const change of changes) {
         if (change.type !== 'position' || !change.position) {
+          continue;
+        }
+
+        if (nextPositions === currentPositions) {
+          nextPositions = { ...currentPositions };
+        }
+
+        nextPositions[change.id] = change.position;
+      }
+
+      return nextPositions;
+    });
+
+    setRoutingPositions((currentPositions) => {
+      let nextPositions = currentPositions;
+
+      for (const change of changes) {
+        if (change.type !== 'position' || !change.position || change.dragging !== false) {
           continue;
         }
 
@@ -195,6 +354,7 @@ function AppShell() {
 
   const resetLayout = useCallback(() => {
     setManualPositions({});
+    setRoutingPositions({});
     window.requestAnimationFrame(() => fitView({ padding: 0.12, duration: 450 }));
   }, [fitView]);
 
@@ -239,6 +399,8 @@ function AppShell() {
             type="button"
             onClick={() => setShowExtensions((value) => !value)}
             aria-pressed={showExtensions}
+            data-tooltip="Show gNMI extension fields and extension-detail relationships."
+            title="Show gNMI extension fields and extension-detail relationships."
           >
             <GitBranch size={16} aria-hidden="true" />
             Extensions
@@ -249,6 +411,8 @@ function AppShell() {
             type="button"
             onClick={() => setShowDeprecated((value) => !value)}
             aria-pressed={showDeprecated}
+            data-tooltip="Show deprecated proto fields and deprecated message types."
+            title="Show deprecated proto fields and deprecated message types."
           >
             <EyeOff size={16} aria-hidden="true" />
             Deprecated
@@ -262,30 +426,41 @@ function AppShell() {
       </header>
 
       <main className="map-stage">
-        <ReactFlow<MapNode, MapEdge>
+        <ReactFlow<MapNode, RoutedMapEdge>
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           onNodesChange={onNodesChange}
+          onNodeDragStop={(_, node) => {
+            setRoutingPositions((currentPositions) => ({
+              ...currentPositions,
+              [node.id]: node.position,
+            }));
+          }}
           nodesDraggable
           minZoom={0.18}
           maxZoom={1.7}
           defaultViewport={{ x: 70, y: 40, zoom: 0.42 }}
           fitView
           fitViewOptions={{ padding: 0.08 }}
-          onNodeClick={(_, node) => setSelectedId(node.id)}
-          onPaneClick={() => setSelectedId(null)}
+          onNodeClick={(_, node) => {
+            setSelectedId(node.id);
+            setSelectedEdgeId(null);
+          }}
+          onEdgeClick={(event, edge) => {
+            event.stopPropagation();
+            setSelectedId(null);
+            setSelectedEdgeId(edge.id);
+          }}
+          onPaneClick={() => {
+            setSelectedId(null);
+            setSelectedEdgeId(null);
+          }}
           proOptions={{ hideAttribution: true }}
         >
           <Background color="#c4ced9" gap={34} size={1.1} />
           <Controls position="bottom-left" />
-          <MiniMap<MapNode>
-            position="bottom-right"
-            pannable
-            zoomable
-            nodeColor={(node) => minimapColor(node.data.kind)}
-            maskColor="rgba(15, 23, 42, 0.08)"
-          />
         </ReactFlow>
 
         <Inspector
@@ -301,10 +476,14 @@ function AppShell() {
 function SchemaNode({ data, selected }: NodeProps<MapNode>) {
   const fields = data.fields ?? [];
   const dimmed = data.active === false;
+  const targetHandles = targetHandlesFromData(data);
+  const activeEdgeSourceHandle =
+    typeof data.activeEdgeSourceHandle === 'string' ? data.activeEdgeSourceHandle : null;
   const className = [
     'schema-node',
     `kind-${data.kind}`,
     selected ? 'is-selected' : '',
+    data.edgeEndpoint ? 'is-edge-endpoint' : '',
     dimmed ? 'is-dimmed' : '',
   ]
     .filter(Boolean)
@@ -312,7 +491,20 @@ function SchemaNode({ data, selected }: NodeProps<MapNode>) {
 
   return (
     <section className={className}>
-      <Handle type="target" position={Position.Left} className="node-target" />
+      {targetHandles.length ? (
+        targetHandles.map((handle) => (
+          <Handle
+            key={handle.id}
+            type="target"
+            id={handle.id}
+            position={Position.Left}
+            className="node-target"
+            style={{ top: `${handle.y}px` }}
+          />
+        ))
+      ) : (
+        <Handle type="target" position={Position.Left} className="node-target" />
+      )}
 
       <header className="node-header">
         <span className="node-kind">{data.kind}</span>
@@ -346,6 +538,7 @@ function SchemaNode({ data, selected }: NodeProps<MapNode>) {
               key={field.id}
               field={field}
               highlighted={fieldMatches(field, data.query ?? '')}
+              edgeHighlighted={field.id === activeEdgeSourceHandle}
               showExtensions={data.showExtensions}
             />
           ))
@@ -360,10 +553,11 @@ function SchemaNode({ data, selected }: NodeProps<MapNode>) {
 type FieldRowProps = {
   field: MapField;
   highlighted: boolean;
+  edgeHighlighted: boolean;
   showExtensions?: boolean;
 };
 
-function FieldRow({ field, highlighted, showExtensions }: FieldRowProps) {
+function FieldRow({ field, highlighted, edgeHighlighted, showExtensions }: FieldRowProps) {
   const isExtension = field.ref === 'extension';
   const visibleExtensionHandle = !isExtension || showExtensions;
 
@@ -373,6 +567,7 @@ function FieldRow({ field, highlighted, showExtensions }: FieldRowProps) {
         'field-row',
         field.ref ? 'has-ref' : '',
         highlighted ? 'is-highlighted' : '',
+        edgeHighlighted ? 'is-edge-highlighted' : '',
         field.badge === 'deprecated' ? 'is-deprecated' : '',
       ]
         .filter(Boolean)
@@ -393,6 +588,286 @@ function FieldRow({ field, highlighted, showExtensions }: FieldRowProps) {
       ) : null}
     </div>
   );
+}
+
+function RoutedEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  data,
+  markerEnd,
+  style,
+  interactionWidth,
+}: EdgeProps<RoutedMapEdge>) {
+  const routePoints =
+    data?.routePoints?.length && data.routePoints.length > 1
+      ? data.routePoints
+      : [
+          { x: sourceX, y: sourceY },
+          { x: targetX, y: targetY },
+        ];
+  const routeBridges = data?.routeBridges ?? [];
+  const stroke = typeof style?.stroke === 'string' ? style.stroke : '#5b708a';
+  const strokeWidth = typeof style?.strokeWidth === 'number' ? style.strokeWidth : 1.6;
+  const path = roundedRoutePath(routePoints);
+
+  return (
+    <>
+      <path
+        className="flow-edge-halo"
+        d={path}
+        style={{ strokeWidth: strokeWidth + 5 }}
+      />
+      <BaseEdge
+        id={id}
+        path={path}
+        markerEnd={markerEnd}
+        style={style}
+        interactionWidth={interactionWidth ?? 28}
+      />
+      {routeBridges.map((bridge, index) => {
+        const path = bridgePath(bridge);
+
+        return (
+          <g key={`${bridge.orientation}-${bridge.x}-${bridge.y}-${index}`}>
+            <path className="flow-edge-bridge-gap" d={path} />
+            <path
+              className="flow-edge-bridge"
+              d={path}
+              style={{
+                stroke,
+                strokeWidth: Math.max(strokeWidth, 1.8),
+              }}
+            />
+          </g>
+        );
+      })}
+    </>
+  );
+}
+
+function roundedRoutePath(points: RoutePoint[], radius = 18): string {
+  if (!points.length) {
+    return '';
+  }
+
+  const [start] = points;
+  const commands = [`M ${start.x} ${start.y}`];
+
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const current = points[index];
+    const next = points[index + 1];
+
+    if (!next) {
+      commands.push(`L ${current.x} ${current.y}`);
+      continue;
+    }
+
+    const incomingDistance = pointDistance(previous, current);
+    const outgoingDistance = pointDistance(current, next);
+    if (incomingDistance === 0 || outgoingDistance === 0) {
+      commands.push(`L ${current.x} ${current.y}`);
+      continue;
+    }
+
+    const cornerRadius = Math.min(radius, incomingDistance / 2, outgoingDistance / 2);
+    const incomingUnit = {
+      x: (current.x - previous.x) / incomingDistance,
+      y: (current.y - previous.y) / incomingDistance,
+    };
+    const outgoingUnit = {
+      x: (next.x - current.x) / outgoingDistance,
+      y: (next.y - current.y) / outgoingDistance,
+    };
+    const beforeCorner = {
+      x: current.x - incomingUnit.x * cornerRadius,
+      y: current.y - incomingUnit.y * cornerRadius,
+    };
+    const afterCorner = {
+      x: current.x + outgoingUnit.x * cornerRadius,
+      y: current.y + outgoingUnit.y * cornerRadius,
+    };
+
+    commands.push(
+      `L ${roundPathNumber(beforeCorner.x)} ${roundPathNumber(beforeCorner.y)}`,
+      `Q ${current.x} ${current.y} ${roundPathNumber(afterCorner.x)} ${roundPathNumber(afterCorner.y)}`,
+    );
+  }
+
+  return commands.join(' ');
+}
+
+function bridgePath(bridge: RouteBridge): string {
+  const radius = 9;
+  const height = 4;
+
+  if (bridge.orientation === 'horizontal') {
+    return [
+      `M ${bridge.x - radius} ${bridge.y}`,
+      `Q ${bridge.x} ${bridge.y - height} ${bridge.x + radius} ${bridge.y}`,
+    ].join(' ');
+  }
+
+  return [
+    `M ${bridge.x} ${bridge.y - radius}`,
+    `Q ${bridge.x + height} ${bridge.y} ${bridge.x} ${bridge.y + radius}`,
+  ].join(' ');
+}
+
+function routeBridges(
+  routedEdges: Array<{ edge: MapEdge; routePoints: RoutePoint[] }>,
+): Map<string, RouteBridge[]> {
+  const bridgesByEdge = new Map<string, RouteBridge[]>();
+  const segments = routedEdges.flatMap(({ edge, routePoints }) =>
+    routeSegments(edge.id, routePoints),
+  );
+
+  for (let firstIndex = 0; firstIndex < segments.length; firstIndex += 1) {
+    const first = segments[firstIndex];
+
+    for (let secondIndex = firstIndex + 1; secondIndex < segments.length; secondIndex += 1) {
+      const second = segments[secondIndex];
+      if (first.edgeId === second.edgeId) {
+        continue;
+      }
+
+      if (first.orientation !== second.orientation) {
+        addCrossingBridge(bridgesByEdge, first, second);
+      }
+    }
+  }
+
+  for (const [edgeId, bridges] of bridgesByEdge) {
+    bridgesByEdge.set(edgeId, dedupeBridges(bridges));
+  }
+
+  return bridgesByEdge;
+}
+
+function routeSegments(edgeId: string, points: RoutePoint[]): RouteSegment[] {
+  const segments: RouteSegment[] = [];
+
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const start = points[index];
+    const end = points[index + 1];
+    if (start.x === end.x && start.y === end.y) {
+      continue;
+    }
+
+    if (start.y === end.y) {
+      segments.push({
+        edgeId,
+        index,
+        start,
+        end,
+        orientation: 'horizontal',
+        fixed: start.y,
+        from: Math.min(start.x, end.x),
+        to: Math.max(start.x, end.x),
+      });
+      continue;
+    }
+
+    if (start.x === end.x) {
+      segments.push({
+        edgeId,
+        index,
+        start,
+        end,
+        orientation: 'vertical',
+        fixed: start.x,
+        from: Math.min(start.y, end.y),
+        to: Math.max(start.y, end.y),
+      });
+    }
+  }
+
+  return segments;
+}
+
+function addCrossingBridge(
+  bridgesByEdge: Map<string, RouteBridge[]>,
+  first: RouteSegment,
+  second: RouteSegment,
+): void {
+  const horizontal = first.orientation === 'horizontal' ? first : second;
+  const vertical = first.orientation === 'vertical' ? first : second;
+  const x = vertical.fixed;
+  const y = horizontal.fixed;
+  const crossingMargin = 34;
+
+  if (
+    x <= horizontal.from + crossingMargin ||
+    x >= horizontal.to - crossingMargin ||
+    y <= vertical.from + crossingMargin ||
+    y >= vertical.to - crossingMargin
+  ) {
+    return;
+  }
+
+  if (segmentsShareEndpoint(first, second)) {
+    return;
+  }
+
+  const bridgeSegment = first.edgeId > second.edgeId ? first : second;
+  appendBridge(bridgesByEdge, bridgeSegment.edgeId, {
+    x,
+    y,
+    orientation: bridgeSegment.orientation,
+  });
+}
+
+function appendBridge(
+  bridgesByEdge: Map<string, RouteBridge[]>,
+  edgeId: string,
+  bridge: RouteBridge,
+): void {
+  bridgesByEdge.set(edgeId, [...(bridgesByEdge.get(edgeId) ?? []), bridge]);
+}
+
+function dedupeBridges(bridges: RouteBridge[]): RouteBridge[] {
+  const seen = new Set<string>();
+
+  return bridges
+    .sort((first, second) => first.x - second.x || first.y - second.y)
+    .filter((bridge) => {
+      const key = `${bridge.orientation}:${Math.round(bridge.x / 8)}:${Math.round(bridge.y / 8)}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
+
+function segmentsShareEndpoint(first: RouteSegment, second: RouteSegment): boolean {
+  return (
+    pointsEqual(first.start, second.start) ||
+    pointsEqual(first.start, second.end) ||
+    pointsEqual(first.end, second.start) ||
+    pointsEqual(first.end, second.end)
+  );
+}
+
+function pointsEqual(first: RoutePoint, second: RoutePoint): boolean {
+  return Math.abs(first.x - second.x) < 0.5 && Math.abs(first.y - second.y) < 0.5;
+}
+
+function pointDistance(first: RoutePoint, second: RoutePoint): number {
+  return Math.hypot(second.x - first.x, second.y - first.y);
+}
+
+function roundPathNumber(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function targetHandlesFromData(data: MapNode['data']): TargetHandleLayout[] {
+  return Array.isArray(data.targetHandles)
+    ? (data.targetHandles as TargetHandleLayout[])
+    : [];
 }
 
 type InspectorProps = {
@@ -448,25 +923,6 @@ function Inspector({ node, totalNodes, totalEdges }: InspectorProps) {
       )}
     </aside>
   );
-}
-
-function minimapColor(kind: MapNodeKind): string {
-  if (kind === 'service') {
-    return '#0b4b8f';
-  }
-  if (kind === 'rpc') {
-    return '#1d6eb8';
-  }
-  if (kind === 'enum') {
-    return '#ab5d00';
-  }
-  if (kind === 'external') {
-    return '#485161';
-  }
-  if (kind === 'legend') {
-    return '#748295';
-  }
-  return '#1f7a72';
 }
 
 export default function App() {

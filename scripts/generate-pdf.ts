@@ -4,21 +4,22 @@ import PDFDocument from 'pdfkit';
 import {
   getVisibleMap,
   mapSource,
-  type MapEdge,
   type MapEdgeKind,
   type MapField,
   type MapNode,
   type MapNodeKind,
 } from '../src/gnmiMap';
 import {
+  computeReadableNodeLayout,
   estimatedMapNodeHeight,
-  improveNodeLayout,
   mapFieldRowHeight,
-  mapNodesBounds,
   mapNodeWidth,
   nodeBadgeHeight,
   nodeBodyPadding,
   nodeHeaderHeight,
+  routeReadableLayout,
+  type RoutedLayoutEdge,
+  type TargetHandleLayout,
 } from '../src/mapLayout';
 
 const outputPath = path.resolve('public/gnmi_0.10.0_map.pdf');
@@ -26,8 +27,6 @@ const pageMargin = 56;
 const titleBandHeight = 84;
 const footerBandHeight = 44;
 const gridGap = 34;
-const edgeGap = 34;
-const loopGap = 72;
 const edgeBendRadius = 18;
 const handleOffset = 5;
 const handleRadius = 4;
@@ -90,39 +89,6 @@ function nodeHeight(node: MapNode): number {
   return estimatedMapNodeHeight(node);
 }
 
-function sourcePoint(node: MapNode, handleId: string): Point {
-  const fields = node.data.fields ?? [];
-  let rowTop =
-    node.position.y +
-    nodeHeaderHeight +
-    (node.data.badges?.length ? nodeBadgeHeight : 0) +
-    nodeBodyPadding;
-
-  for (const field of fields) {
-    const rowHeight = mapFieldRowHeight(field);
-    if (field.id === handleId) {
-      return {
-        x: node.position.x + mapNodeWidth(node) + handleOffset,
-        y: rowTop + rowHeight / 2,
-      };
-    }
-
-    rowTop += rowHeight;
-  }
-
-  return {
-    x: node.position.x + mapNodeWidth(node) + handleOffset,
-    y: node.position.y + nodeHeight(node) / 2,
-  };
-}
-
-function targetPoint(node: MapNode): Point {
-  return {
-    x: node.position.x - handleOffset,
-    y: node.position.y + nodeHeight(node) / 2,
-  };
-}
-
 function toPdfPoint(point: Point, context: PdfContext): Point {
   return {
     x: point.x + context.offset.x,
@@ -175,43 +141,6 @@ function drawArrow(
     .closePath()
     .fill()
     .restore();
-}
-
-function normalizePoints(points: Point[]): Point[] {
-  return points.filter((point, index) => {
-    const previous = points[index - 1];
-    return !previous || previous.x !== point.x || previous.y !== point.y;
-  });
-}
-
-function smoothStepPoints(start: Point, end: Point): Point[] {
-  const sourceX = start.x + edgeGap;
-  const targetX = end.x - edgeGap;
-
-  if (targetX > sourceX) {
-    const midX = sourceX + (targetX - sourceX) / 2;
-    return normalizePoints([
-      start,
-      { x: sourceX, y: start.y },
-      { x: midX, y: start.y },
-      { x: midX, y: end.y },
-      { x: targetX, y: end.y },
-      end,
-    ]);
-  }
-
-  const loopX = Math.max(start.x, end.x) + loopGap;
-  const midY = start.y + (end.y - start.y) / 2;
-
-  return normalizePoints([
-    start,
-    { x: sourceX, y: start.y },
-    { x: loopX, y: start.y },
-    { x: loopX, y: midY },
-    { x: targetX, y: midY },
-    { x: targetX, y: end.y },
-    end,
-  ]);
 }
 
 function distance(first: Point, second: Point): number {
@@ -270,18 +199,16 @@ function drawRoundedPath(
 
 function drawEdge(
   doc: PDFKit.PDFDocument,
-  edge: MapEdge,
-  nodesById: Map<string, MapNode>,
+  routedEdge: RoutedLayoutEdge,
   context: PdfContext,
 ): void {
-  const source = nodesById.get(edge.source);
-  const target = nodesById.get(edge.target);
-  if (!source || !target) {
+  if (routedEdge.routePoints.length < 2) {
     return;
   }
 
+  const edge = routedEdge.edge;
   const style = edgeStyles[edge.kind] ?? edgeStyles.field;
-  const points = smoothStepPoints(sourcePoint(source, edge.sourceHandle), targetPoint(target));
+  const points = routedEdge.routePoints;
   const end = toPdfPoint(points[points.length - 1], context);
   const beforeEnd = toPdfPoint(points[points.length - 2], context);
 
@@ -544,7 +471,20 @@ function drawNode(doc: PDFKit.PDFDocument, node: MapNode, context: PdfContext): 
     });
   }
 
-  drawHandle(doc, x - handleOffset, y + height / 2, handleFill(node));
+  const targetHandles = targetHandlesFromData(node);
+  if (targetHandles.length) {
+    for (const handle of targetHandles) {
+      drawHandle(doc, x - handleOffset, y + handle.y, handleFill(node));
+    }
+  } else {
+    drawHandle(doc, x - handleOffset, y + height / 2, handleFill(node));
+  }
+}
+
+function targetHandlesFromData(node: MapNode): TargetHandleLayout[] {
+  return Array.isArray(node.data.targetHandles)
+    ? (node.data.targetHandles as TargetHandleLayout[])
+    : [];
 }
 
 function drawCanvasBackground(doc: PDFKit.PDFDocument, pageWidth: number, pageHeight: number): void {
@@ -594,9 +534,10 @@ async function main() {
     showDeprecated: false,
     showExtensions: true,
   });
-  const pdfNodes = improveNodeLayout(nodes);
-  const nodesById = new Map<string, MapNode>(pdfNodes.map((node) => [node.id, node]));
-  const bounds = mapNodesBounds(pdfNodes);
+  const layoutNodes = await computeReadableNodeLayout(nodes, pdfEdges);
+  const layout = routeReadableLayout(layoutNodes, pdfEdges);
+  const pdfNodes = layout.nodes;
+  const bounds = layout.bounds;
   const pageWidth = bounds.width + pageMargin * 2;
   const pageHeight = bounds.height + titleBandHeight + footerBandHeight;
   const context: PdfContext = {
@@ -626,8 +567,8 @@ async function main() {
   drawCanvasBackground(doc, pageWidth, pageHeight);
   drawTitle(doc, pageWidth);
 
-  for (const edge of pdfEdges) {
-    drawEdge(doc, edge, nodesById, context);
+  for (const edge of layout.edges) {
+    drawEdge(doc, edge, context);
   }
 
   for (const node of pdfNodes) {

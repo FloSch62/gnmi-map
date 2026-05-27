@@ -6,6 +6,13 @@ import {
   type MapEdge,
   type MapNode,
 } from '../src/gnmiMap';
+import {
+  computeReadableNodeLayout,
+  estimatedMapNodeHeight,
+  mapNodeWidth,
+  routeIntersectsNode,
+  routeReadableLayout,
+} from '../src/mapLayout';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -79,14 +86,62 @@ function validateDeprecatedVisibility(): void {
   );
 }
 
-validateEdges(mapNodes, mapEdges, 'raw map');
-validateEdges(getVisibleMap().nodes, getVisibleMap().edges, 'default map');
-validateEdges(
-  getVisibleMap({ showDeprecated: true }).nodes,
-  getVisibleMap({ showDeprecated: true }).edges,
-  'deprecated map',
-);
-validateLinks();
-validateDeprecatedVisibility();
+async function validateReadableLayout(nodes: MapNode[], edges: MapEdge[], label: string): Promise<void> {
+  const layoutNodes = await computeReadableNodeLayout(nodes, edges);
+  const layout = routeReadableLayout(layoutNodes, edges);
 
-console.log('Map data is valid');
+  for (let firstIndex = 0; firstIndex < layout.nodes.length; firstIndex += 1) {
+    const first = layout.nodes[firstIndex];
+    for (let secondIndex = firstIndex + 1; secondIndex < layout.nodes.length; secondIndex += 1) {
+      const second = layout.nodes[secondIndex];
+      assert(!nodesOverlap(first, second), `${label}: nodes ${first.id} and ${second.id} overlap`);
+    }
+  }
+
+  for (const routedEdge of layout.edges) {
+    for (const node of layout.nodes) {
+      if (node.id === routedEdge.edge.source || node.id === routedEdge.edge.target) {
+        continue;
+      }
+
+      assert(
+        !routeIntersectsNode(routedEdge.routePoints, node),
+        `${label}: edge ${routedEdge.edge.id} intersects node ${node.id}`,
+      );
+    }
+  }
+}
+
+function nodesOverlap(first: MapNode, second: MapNode): boolean {
+  return (
+    first.position.x < second.position.x + mapNodeWidth(second) &&
+    first.position.x + mapNodeWidth(first) > second.position.x &&
+    first.position.y < second.position.y + estimatedMapNodeHeight(second) &&
+    first.position.y + estimatedMapNodeHeight(first) > second.position.y
+  );
+}
+
+async function main(): Promise<void> {
+  const appDefaultMap = getVisibleMap({ showExtensions: false });
+  const extensionMap = getVisibleMap({ showExtensions: true });
+  const deprecatedMap = getVisibleMap({ showDeprecated: true, showExtensions: false });
+  const fullMap = getVisibleMap({ showDeprecated: true, showExtensions: true });
+
+  validateEdges(mapNodes, mapEdges, 'raw map');
+  validateEdges(appDefaultMap.nodes, appDefaultMap.edges, 'default map');
+  validateEdges(deprecatedMap.nodes, deprecatedMap.edges, 'deprecated map');
+  validateLinks();
+  validateDeprecatedVisibility();
+
+  await validateReadableLayout(appDefaultMap.nodes, appDefaultMap.edges, 'default layout');
+  await validateReadableLayout(extensionMap.nodes, extensionMap.edges, 'extension layout');
+  await validateReadableLayout(deprecatedMap.nodes, deprecatedMap.edges, 'deprecated layout');
+  await validateReadableLayout(fullMap.nodes, fullMap.edges, 'full layout');
+
+  console.log('Map data is valid');
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

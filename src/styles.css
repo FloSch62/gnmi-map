@@ -116,6 +116,7 @@ a {
 }
 
 .tool-button {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -130,6 +131,38 @@ a {
   font-size: 14px;
   font-weight: 700;
   text-decoration: none;
+}
+
+.tool-button[data-tooltip]::after {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 20;
+  width: max-content;
+  max-width: 270px;
+  padding: 8px 10px;
+  border: 1px solid #27364a;
+  border-radius: 6px;
+  background: #172033;
+  color: #ffffff;
+  content: attr(data-tooltip);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  text-align: left;
+  transform: translateY(-2px);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+  white-space: normal;
+}
+
+.tool-button[data-tooltip]:hover::after,
+.tool-button[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .tool-button:hover,
@@ -149,10 +182,14 @@ a {
 
 .map-stage {
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
   min-height: 0;
 }
 
 .react-flow {
+  width: 100%;
+  height: 100%;
   background:
     linear-gradient(90deg, rgba(11, 75, 143, 0.04), transparent 36%),
     linear-gradient(0deg, rgba(22, 115, 107, 0.04), transparent 42%),
@@ -181,6 +218,13 @@ a {
   box-shadow:
     0 0 0 3px rgba(36, 116, 201, 0.16),
     0 10px 28px rgba(31, 41, 55, 0.16);
+}
+
+.schema-node.is-edge-endpoint {
+  border-color: #d21f3c;
+  box-shadow:
+    0 0 0 3px rgba(210, 31, 60, 0.16),
+    0 10px 28px rgba(31, 41, 55, 0.14);
 }
 
 .schema-node.is-dimmed {
@@ -329,6 +373,11 @@ a {
   box-shadow: inset 0 0 0 1px #ecd676;
 }
 
+.field-row.is-edge-highlighted {
+  background: #ffe4e8;
+  box-shadow: inset 0 0 0 1px rgba(210, 31, 60, 0.44);
+}
+
 .field-row.is-deprecated .field-type,
 .field-row.is-deprecated .field-name {
   text-decoration: line-through;
@@ -369,6 +418,7 @@ a {
 
 .node-target {
   left: -5px;
+  opacity: 0;
 }
 
 .field-handle {
@@ -385,11 +435,45 @@ a {
   filter: drop-shadow(0 1px 1px rgba(11, 75, 143, 0.16));
 }
 
-.react-flow__minimap {
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.94);
+.flow-edge .react-flow__edge-path {
+  transition:
+    opacity 160ms ease,
+    stroke 160ms ease,
+    stroke-width 160ms ease;
+}
+
+.flow-edge-halo {
+  fill: none;
+  opacity: 0.72;
+  pointer-events: none;
+  stroke: #ffffff;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.flow-edge-bridge,
+.flow-edge-bridge-gap {
+  fill: none;
+  pointer-events: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.flow-edge-bridge-gap {
+  stroke: var(--page-bg);
+  stroke-width: 8px;
+}
+
+.flow-edge-bridge {
+  stroke-dasharray: none;
+}
+
+.flow-edge.is-selected .react-flow__edge-path {
+  filter: drop-shadow(0 2px 3px rgba(210, 31, 60, 0.28));
+}
+
+.flow-edge.is-dimmed .react-flow__edge-path {
+  pointer-events: stroke;
 }
 
 .react-flow__controls {
@@ -404,18 +488,17 @@ a {
 }
 
 .inspector {
-  position: absolute;
-  top: 18px;
-  right: 18px;
+  position: relative;
   z-index: 4;
-  width: min(330px, calc(100vw - 36px));
-  max-height: calc(100% - 36px);
+  width: auto;
+  max-height: none;
   overflow: auto;
   padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
   background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 14px 34px rgba(31, 41, 55, 0.16);
+  box-shadow: -8px 0 20px rgba(31, 41, 55, 0.07);
 }
 
 .inspector p {
@@ -499,12 +582,17 @@ a {
     flex: 1 1 120px;
   }
 
+  .map-stage {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(420px, 1fr) auto;
+  }
+
   .inspector {
-    top: auto;
-    right: 10px;
-    bottom: 10px;
-    left: 10px;
+    position: relative;
     width: auto;
-    max-height: 34%;
+    max-height: 34vh;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+    box-shadow: 0 -8px 20px rgba(31, 41, 55, 0.08);
   }
 }
