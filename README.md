@@ -9,6 +9,21 @@ gNMI Map makes it easy to understand the composition of the gNMI service as well
 
 <p align=center><img src="https://gitlab.com/rdodin/pics/-/wikis/uploads/61e7fa143e5898653c1edb9b42b936f3/image.png" width="600" /></p>
 
+## React Flow map
+
+This repository now includes a React Flow recreation of the gNMI 0.7.0 PDF map. It keeps the original PDF as a reference while adding an interactive canvas with search, field-level links, a minimap, source/documentation links, and an extension-edge toggle.
+
+```bash
+npm install
+npm run dev
+```
+
+Open the dev-server URL printed by Vite. For a production build:
+
+```bash
+npm run build
+```
+
 ## Usage
 The map can be downloaded from this repository or viewed right in a browser. The maps for the following gNMI service versions have been created so far:
 
