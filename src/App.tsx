@@ -34,6 +34,7 @@ import {
   type MapNodeKind,
   mapSource,
 } from './gnmiMap';
+import { improveNodeLayout } from './mapLayout';
 
 const edgeStyleByKind: Record<MapEdgeKind, CSSProperties> = {
   rpc: { stroke: '#0b4b8f', strokeWidth: 2.2 },
@@ -50,124 +51,10 @@ const nodeTypes: NodeTypes = {
   schema: SchemaNode,
 };
 
-const nodeHeaderHeight = 36;
-const nodeBodyPadding = 8;
-const nodeBadgeHeight = 24;
-const estimatedFieldRowHeight = 32;
-const layoutGapX = 8;
-const layoutGapY = 18;
-const maxLayoutPasses = 50;
-
 type NodePosition = {
   x: number;
   y: number;
 };
-
-type LayoutBox = {
-  id: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
-
-function nodeWidth(node: MapNode): number {
-  const width = node.style?.width;
-
-  if (typeof width === 'number') {
-    return width;
-  }
-
-  if (typeof width === 'string') {
-    const parsedWidth = Number.parseFloat(width);
-    return Number.isFinite(parsedWidth) ? parsedWidth : 320;
-  }
-
-  return 320;
-}
-
-function estimatedNodeHeight(node: MapNode): number {
-  const rows = Math.max(node.data.fields?.length ?? 0, 1);
-  const badgeHeight = node.data.badges?.length ? nodeBadgeHeight : 0;
-
-  return nodeHeaderHeight + badgeHeight + nodeBodyPadding * 2 + rows * estimatedFieldRowHeight;
-}
-
-function boxesOverlap(first: LayoutBox, second: LayoutBox): boolean {
-  return (
-    first.x < second.x + second.width + layoutGapX &&
-    first.x + first.width + layoutGapX > second.x &&
-    first.y < second.y + second.height + layoutGapY &&
-    first.y + first.height + layoutGapY > second.y
-  );
-}
-
-function improveNodeLayout(nodes: MapNode[]): MapNode[] {
-  const boxes = new Map<string, LayoutBox>(
-    nodes.map((node) => [
-      node.id,
-      {
-        id: node.id,
-        x: node.position.x,
-        y: node.position.y,
-        width: nodeWidth(node),
-        height: estimatedNodeHeight(node),
-      },
-    ]),
-  );
-
-  for (let pass = 0; pass < maxLayoutPasses; pass += 1) {
-    let moved = false;
-    const sortedBoxes = [...boxes.values()].sort((first, second) => {
-      if (first.y !== second.y) {
-        return first.y - second.y;
-      }
-
-      return first.x - second.x;
-    });
-
-    for (let index = 0; index < sortedBoxes.length; index += 1) {
-      const anchor = sortedBoxes[index];
-
-      for (let nextIndex = index + 1; nextIndex < sortedBoxes.length; nextIndex += 1) {
-        const candidate = sortedBoxes[nextIndex];
-
-        if (candidate.y >= anchor.y + anchor.height + layoutGapY) {
-          break;
-        }
-
-        if (!boxesOverlap(anchor, candidate)) {
-          continue;
-        }
-
-        const nextY = anchor.y + anchor.height + layoutGapY;
-        if (candidate.y < nextY) {
-          candidate.y = nextY;
-          moved = true;
-        }
-      }
-    }
-
-    if (!moved) {
-      break;
-    }
-  }
-
-  return nodes.map((node) => {
-    const box = boxes.get(node.id);
-    if (!box || (box.x === node.position.x && box.y === node.position.y)) {
-      return node;
-    }
-
-    return {
-      ...node,
-      position: {
-        x: box.x,
-        y: box.y,
-      },
-    };
-  });
-}
 
 function searchableText(node: MapNode): string {
   const fieldText = node.data.fields

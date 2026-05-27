@@ -3,22 +3,34 @@ import path from 'node:path';
 import PDFDocument from 'pdfkit';
 import {
   getVisibleMap,
-  mapBounds,
   mapSource,
   type MapEdge,
   type MapEdgeKind,
+  type MapField,
   type MapNode,
   type MapNodeKind,
 } from '../src/gnmiMap';
+import {
+  estimatedMapNodeHeight,
+  improveNodeLayout,
+  mapFieldRowHeight,
+  mapNodesBounds,
+  mapNodeWidth,
+  nodeBadgeHeight,
+  nodeBodyPadding,
+  nodeHeaderHeight,
+} from '../src/mapLayout';
 
-const outputPath = path.resolve('gnmi_0.10.0_map.pdf');
-const publicOutputPath = path.resolve('public/gnmi_0.10.0_map.pdf');
-const margin = 56;
-const pageWidth = mapBounds.width + margin * 2;
-const pageHeight = mapBounds.height + margin * 2;
-const headerHeight = 42;
-const rowHeight = 29;
-const bodyPadding = 8;
+const outputPath = path.resolve('public/gnmi_0.10.0_map.pdf');
+const pageMargin = 56;
+const titleBandHeight = 84;
+const footerBandHeight = 44;
+const gridGap = 34;
+const edgeGap = 34;
+const loopGap = 72;
+const edgeBendRadius = 18;
+const handleOffset = 5;
+const handleRadius = 4;
 
 const colors = {
   background: '#f4f6f8',
@@ -28,17 +40,34 @@ const colors = {
   text: '#172033',
   muted: '#677486',
   blue: '#0b4b8f',
+  blueSoft: '#d9eaf9',
   rpc: '#1c62a0',
   teal: '#16736b',
   amber: '#a15c03',
+  amberSoft: '#fbebd3',
   gray: '#4d5a6b',
+  focus: '#2474c9',
   reserved: '#e7ebf0',
   deprecated: '#fee2df',
+  deprecatedText: '#9b1c15',
+  handle: '#2d6f97',
+  grid: '#c4ced9',
 };
 
 type Point = {
   x: number;
   y: number;
+};
+
+type PdfContext = {
+  offset: Point;
+  connectedHandles: Set<string>;
+};
+
+type EdgeStyle = {
+  color: string;
+  width: number;
+  dash?: [number, number];
 };
 
 const headerColors: Record<MapNodeKind, string> = {
@@ -50,58 +79,77 @@ const headerColors: Record<MapNodeKind, string> = {
   message: colors.teal,
 };
 
-const edgeColors: Record<MapEdgeKind, string> = {
-  rpc: '#0b4b8f',
-  field: '#5b708a',
-  extension: '#8a6a1f',
-  'extension-detail': '#b47a18',
+const edgeStyles: Record<MapEdgeKind, EdgeStyle> = {
+  rpc: { color: '#0b4b8f', width: 2.2 },
+  field: { color: '#5b708a', width: 1.6 },
+  extension: { color: '#8a6a1f', width: 1.4, dash: [7, 6] },
+  'extension-detail': { color: '#b47a18', width: 1.5 },
 };
 
-function nodeWidth(node: MapNode): number {
-  const width = node.style?.width;
-  return typeof width === 'number' ? width : 320;
-}
-
 function nodeHeight(node: MapNode): number {
-  const fields = node.data.fields ?? [];
-  const badgeHeight = node.data.badges?.length ? 24 : 0;
-  const rows = Math.max(fields.length, 1);
-  return headerHeight + badgeHeight + bodyPadding * 2 + rows * rowHeight;
+  return estimatedMapNodeHeight(node);
 }
 
 function sourcePoint(node: MapNode, handleId: string): Point {
   const fields = node.data.fields ?? [];
-  const index = Math.max(
-    0,
-    fields.findIndex((field) => field.id === handleId),
-  );
-  const y =
+  let rowTop =
     node.position.y +
-    headerHeight +
-    (node.data.badges?.length ? 24 : 0) +
-    bodyPadding +
-    index * rowHeight +
-    rowHeight / 2;
+    nodeHeaderHeight +
+    (node.data.badges?.length ? nodeBadgeHeight : 0) +
+    nodeBodyPadding;
+
+  for (const field of fields) {
+    const rowHeight = mapFieldRowHeight(field);
+    if (field.id === handleId) {
+      return {
+        x: node.position.x + mapNodeWidth(node) + handleOffset,
+        y: rowTop + rowHeight / 2,
+      };
+    }
+
+    rowTop += rowHeight;
+  }
 
   return {
-    x: node.position.x + nodeWidth(node),
-    y,
+    x: node.position.x + mapNodeWidth(node) + handleOffset,
+    y: node.position.y + nodeHeight(node) / 2,
   };
 }
 
 function targetPoint(node: MapNode): Point {
   return {
-    x: node.position.x,
+    x: node.position.x - handleOffset,
     y: node.position.y + nodeHeight(node) / 2,
   };
 }
 
-function trimText(value: string, limit: number): string {
-  if (value.length <= limit) {
+function toPdfPoint(point: Point, context: PdfContext): Point {
+  return {
+    x: point.x + context.offset.x,
+    y: point.y + context.offset.y,
+  };
+}
+
+function trimTextToWidth(doc: PDFKit.PDFDocument, value: string, maxWidth: number): string {
+  if (doc.widthOfString(value) <= maxWidth) {
     return value;
   }
 
-  return `${value.slice(0, limit - 1)}...`;
+  const suffix = '...';
+  let trimmed = value;
+  while (trimmed.length > 0 && doc.widthOfString(`${trimmed}${suffix}`) > maxWidth) {
+    trimmed = trimmed.slice(0, -1);
+  }
+
+  return trimmed ? `${trimmed}${suffix}` : suffix;
+}
+
+function fieldHandleKey(node: MapNode, field: MapField): string {
+  return `${node.id}:${field.id}`;
+}
+
+function handleFill(node: MapNode): string {
+  return node.data.kind === 'enum' ? colors.amber : colors.handle;
 }
 
 function drawArrow(
@@ -129,10 +177,102 @@ function drawArrow(
     .restore();
 }
 
+function normalizePoints(points: Point[]): Point[] {
+  return points.filter((point, index) => {
+    const previous = points[index - 1];
+    return !previous || previous.x !== point.x || previous.y !== point.y;
+  });
+}
+
+function smoothStepPoints(start: Point, end: Point): Point[] {
+  const sourceX = start.x + edgeGap;
+  const targetX = end.x - edgeGap;
+
+  if (targetX > sourceX) {
+    const midX = sourceX + (targetX - sourceX) / 2;
+    return normalizePoints([
+      start,
+      { x: sourceX, y: start.y },
+      { x: midX, y: start.y },
+      { x: midX, y: end.y },
+      { x: targetX, y: end.y },
+      end,
+    ]);
+  }
+
+  const loopX = Math.max(start.x, end.x) + loopGap;
+  const midY = start.y + (end.y - start.y) / 2;
+
+  return normalizePoints([
+    start,
+    { x: sourceX, y: start.y },
+    { x: loopX, y: start.y },
+    { x: loopX, y: midY },
+    { x: targetX, y: midY },
+    { x: targetX, y: end.y },
+    end,
+  ]);
+}
+
+function distance(first: Point, second: Point): number {
+  return Math.hypot(second.x - first.x, second.y - first.y);
+}
+
+function drawRoundedPath(
+  doc: PDFKit.PDFDocument,
+  points: Point[],
+  context: PdfContext,
+): void {
+  const pdfPoints = points.map((point) => toPdfPoint(point, context));
+  const [start] = pdfPoints;
+  doc.moveTo(start.x, start.y);
+
+  for (let index = 1; index < pdfPoints.length; index += 1) {
+    const previous = pdfPoints[index - 1];
+    const current = pdfPoints[index];
+    const next = pdfPoints[index + 1];
+
+    if (!next) {
+      doc.lineTo(current.x, current.y);
+      continue;
+    }
+
+    const incomingDistance = distance(previous, current);
+    const outgoingDistance = distance(current, next);
+    if (incomingDistance === 0 || outgoingDistance === 0) {
+      doc.lineTo(current.x, current.y);
+      continue;
+    }
+
+    const radius = Math.min(edgeBendRadius, incomingDistance / 2, outgoingDistance / 2);
+    const incomingUnit = {
+      x: (current.x - previous.x) / incomingDistance,
+      y: (current.y - previous.y) / incomingDistance,
+    };
+    const outgoingUnit = {
+      x: (next.x - current.x) / outgoingDistance,
+      y: (next.y - current.y) / outgoingDistance,
+    };
+    const beforeCorner = {
+      x: current.x - incomingUnit.x * radius,
+      y: current.y - incomingUnit.y * radius,
+    };
+    const afterCorner = {
+      x: current.x + outgoingUnit.x * radius,
+      y: current.y + outgoingUnit.y * radius,
+    };
+
+    doc
+      .lineTo(beforeCorner.x, beforeCorner.y)
+      .quadraticCurveTo(current.x, current.y, afterCorner.x, afterCorner.y);
+  }
+}
+
 function drawEdge(
   doc: PDFKit.PDFDocument,
   edge: MapEdge,
   nodesById: Map<string, MapNode>,
+  context: PdfContext,
 ): void {
   const source = nodesById.get(edge.source);
   const target = nodesById.get(edge.target);
@@ -140,39 +280,34 @@ function drawEdge(
     return;
   }
 
-  const start = sourcePoint(source, edge.sourceHandle);
-  const end = targetPoint(target);
-  const color = edgeColors[edge.kind] ?? edgeColors.field;
-  const dx = Math.max(90, Math.abs(end.x - start.x) * 0.38);
-  const c1 = { x: start.x + dx, y: start.y };
-  const c2 = { x: end.x - dx, y: end.y };
+  const style = edgeStyles[edge.kind] ?? edgeStyles.field;
+  const points = smoothStepPoints(sourcePoint(source, edge.sourceHandle), targetPoint(target));
+  const end = toPdfPoint(points[points.length - 1], context);
+  const beforeEnd = toPdfPoint(points[points.length - 2], context);
 
-  doc.save();
-  doc.lineWidth(edge.kind === 'rpc' ? 2.2 : 1.4).strokeColor(color).opacity(0.78);
-  if (edge.kind === 'extension') {
-    doc.dash(8, { space: 6 });
-  }
   doc
-    .moveTo(start.x + margin, start.y + margin)
-    .bezierCurveTo(
-      c1.x + margin,
-      c1.y + margin,
-      c2.x + margin,
-      c2.y + margin,
-      end.x + margin,
-      end.y + margin,
-    )
-    .stroke();
-  doc.undash();
-  doc.opacity(1);
-  drawArrow(
-    doc,
-    end.x + margin,
-    end.y + margin,
-    Math.atan2(end.y - c2.y, end.x - c2.x),
-    color,
-  );
-  doc.restore();
+    .save()
+    .lineCap('round')
+    .lineJoin('round')
+    .lineWidth(style.width + 3)
+    .strokeColor('#ffffff')
+    .opacity(0.72);
+  drawRoundedPath(doc, points, context);
+  doc.stroke().restore();
+
+  doc
+    .save()
+    .lineCap('round')
+    .lineJoin('round')
+    .lineWidth(style.width)
+    .strokeColor(style.color);
+  if (style.dash) {
+    doc.dash(style.dash[0], { space: style.dash[1] });
+  }
+  drawRoundedPath(doc, points, context);
+  doc.stroke().undash().restore();
+
+  drawArrow(doc, end.x, end.y, Math.atan2(end.y - beforeEnd.y, end.x - beforeEnd.x), style.color);
 }
 
 function drawBadge(
@@ -183,27 +318,161 @@ function drawBadge(
   color: string,
   fill: string,
 ): number {
-  const width = Math.max(46, doc.widthOfString(text) + 12);
+  doc.font('Helvetica-Bold').fontSize(6.8);
+  const width = Math.max(46, doc.widthOfString(text.toUpperCase()) + 12);
   doc
     .save()
     .fillColor(fill)
-    .roundedRect(x, y, width, 16, 8)
+    .roundedRect(x, y, width, 18, 9)
     .fill()
     .fillColor(color)
-    .font('Helvetica-Bold')
-    .fontSize(6.8)
-    .text(text.toUpperCase(), x + 6, y + 5, { lineBreak: false })
+    .text(text.toUpperCase(), x + 6, y + 6, { lineBreak: false })
     .restore();
+
   return width;
 }
 
-function drawNode(doc: PDFKit.PDFDocument, node: MapNode): void {
-  const x = node.position.x + margin;
-  const y = node.position.y + margin;
-  const width = nodeWidth(node);
+function drawHandle(doc: PDFKit.PDFDocument, x: number, y: number, fill: string): void {
+  doc
+    .save()
+    .circle(x, y, handleRadius)
+    .fillColor(fill)
+    .fill()
+    .circle(x, y, handleRadius)
+    .lineWidth(2)
+    .strokeColor('#ffffff')
+    .stroke()
+    .restore();
+}
+
+function drawHeaderLinks(doc: PDFKit.PDFDocument, node: MapNode, x: number, y: number): void {
+  let linkX = x + mapNodeWidth(node) - 54;
+
+  if (node.data.protoUrl) {
+    doc
+      .save()
+      .fillOpacity(0.14)
+      .fillColor('#ffffff')
+      .roundedRect(linkX, y + 7, 24, 24, 6)
+      .fill()
+      .fillOpacity(1)
+      .font('Helvetica-Bold')
+      .fontSize(8)
+      .fillColor('#ffffff')
+      .text('P', linkX + 9, y + 15, { lineBreak: false })
+      .restore();
+    doc.link(linkX, y + 7, 24, 24, node.data.protoUrl);
+    linkX += 29;
+  }
+
+  if (node.data.specUrl) {
+    doc
+      .save()
+      .fillOpacity(0.14)
+      .fillColor('#ffffff')
+      .roundedRect(linkX, y + 7, 24, 24, 6)
+      .fill()
+      .fillOpacity(1)
+      .font('Helvetica-Bold')
+      .fontSize(8)
+      .fillColor('#ffffff')
+      .text('D', linkX + 9, y + 15, { lineBreak: false })
+      .restore();
+    doc.link(linkX, y + 7, 24, 24, node.data.specUrl);
+  }
+}
+
+function drawFieldRow(
+  doc: PDFKit.PDFDocument,
+  node: MapNode,
+  field: MapField,
+  rowIndex: number,
+  x: number,
+  y: number,
+  width: number,
+  context: PdfContext,
+): void {
+  const rowHeight = mapFieldRowHeight(field);
+  const rowRadius = 6;
+  const nameX = x + Math.floor(width * 0.46);
+  const rowRightPadding = context.connectedHandles.has(fieldHandleKey(node, field)) ? 30 : 18;
+  const typeMaxWidth = nameX - x - 26;
+  const nameMaxWidth = width - (nameX - x) - rowRightPadding;
+
+  if (rowIndex % 2 === 0) {
+    doc
+      .save()
+      .fillColor(colors.panelSoft)
+      .roundedRect(x + 8, y, width - 16, rowHeight - 2, rowRadius)
+      .fill()
+      .restore();
+  }
+
+  doc
+    .font('Helvetica-Bold')
+    .fontSize(8.5)
+    .fillColor('#526071')
+    .text(trimTextToWidth(doc, field.type, typeMaxWidth), x + 14, y + 8, {
+      width: typeMaxWidth,
+      lineBreak: false,
+    });
+
+  doc
+    .font('Courier-Bold')
+    .fontSize(8.5)
+    .fillColor(colors.text)
+    .text(trimTextToWidth(doc, field.name, nameMaxWidth), nameX, y + 8, {
+      width: nameMaxWidth,
+      lineBreak: false,
+    });
+
+  if (field.badge === 'deprecated') {
+    doc
+      .save()
+      .moveTo(x + 14, y + 15)
+      .lineTo(nameX + Math.min(nameMaxWidth, doc.widthOfString(field.name)), y + 15)
+      .lineWidth(0.6)
+      .strokeColor(colors.deprecatedText)
+      .opacity(0.55)
+      .stroke()
+      .restore();
+  }
+
+  if (field.group || field.badge) {
+    const detailY = y + 28;
+    let badgeX = x + 14;
+    if (field.group) {
+      badgeX += drawBadge(doc, field.group, badgeX, detailY, '#164675', colors.blueSoft) + 6;
+    }
+
+    if (field.badge) {
+      const fill = field.badge === 'reserved' ? colors.reserved : colors.deprecated;
+      const textColor = field.badge === 'reserved' ? colors.gray : colors.deprecatedText;
+      drawBadge(doc, field.badge, badgeX, detailY, textColor, fill);
+    }
+  }
+
+  if (context.connectedHandles.has(fieldHandleKey(node, field))) {
+    drawHandle(doc, x + width + handleOffset, y + rowHeight / 2, handleFill(node));
+  }
+}
+
+function drawNode(doc: PDFKit.PDFDocument, node: MapNode, context: PdfContext): void {
+  const origin = toPdfPoint(node.position, context);
+  const x = origin.x;
+  const y = origin.y;
+  const width = mapNodeWidth(node);
   const height = nodeHeight(node);
   const fields = node.data.fields ?? [];
   const headerColor = headerColors[node.data.kind] ?? colors.teal;
+
+  doc
+    .save()
+    .fillOpacity(0.09)
+    .fillColor('#1f2937')
+    .roundedRect(x, y + 8, width, height, 8)
+    .fill()
+    .restore();
 
   doc
     .save()
@@ -219,66 +488,47 @@ function drawNode(doc: PDFKit.PDFDocument, node: MapNode): void {
   doc
     .save()
     .fillColor(headerColor)
-    .roundedRect(x, y, width, headerHeight, 8)
+    .roundedRect(x, y, width, nodeHeaderHeight, 8)
     .fill()
-    .rect(x, y + headerHeight - 8, width, 8)
+    .rect(x, y + nodeHeaderHeight - 8, width, 8)
     .fill()
     .restore();
 
   const kindLabel = node.data.kind.toUpperCase();
+  doc.font('Helvetica-Bold').fontSize(6.8);
+  const kindPillWidth = Math.max(34, doc.widthOfString(kindLabel) + 12);
   doc
-    .font('Helvetica-Bold')
-    .fontSize(7)
-    .fillColor('#dbeafe')
-    .text(kindLabel, x + 10, y + 9, { lineBreak: false });
+    .save()
+    .fillOpacity(0.16)
+    .fillColor('#ffffff')
+    .roundedRect(x + 10, y + 10, kindPillWidth, 16, 8)
+    .fill()
+    .fillOpacity(1)
+    .fillColor('#ffffff')
+    .text(kindLabel, x + 16, y + 15, { lineBreak: false })
+    .restore();
 
+  const titleX = x + 10 + kindPillWidth + 8;
+  const titleWidth = width - (titleX - x) - 70;
   doc
     .font('Helvetica-Bold')
     .fontSize(13)
     .fillColor('#ffffff')
-    .text(trimText(node.data.label, 38), x + 10, y + 22, {
-      width: width - 72,
+    .text(trimTextToWidth(doc, node.data.label, titleWidth), titleX, y + 11, {
+      width: titleWidth,
       lineBreak: false,
     });
 
-  let linkX = x + width - 52;
-  if (node.data.protoUrl) {
-    doc
-      .roundedRect(linkX, y + 10, 18, 18, 4)
-      .fillOpacity(0.18)
-      .fillColor('#ffffff')
-      .fill()
-      .fillOpacity(1)
-      .font('Helvetica-Bold')
-      .fontSize(8)
-      .fillColor('#ffffff')
-      .text('P', linkX + 6, y + 15, { lineBreak: false });
-    doc.link(linkX, y + 10, 18, 18, node.data.protoUrl);
-    linkX += 23;
-  }
+  drawHeaderLinks(doc, node, x, y);
 
-  if (node.data.specUrl) {
-    doc
-      .roundedRect(linkX, y + 10, 18, 18, 4)
-      .fillOpacity(0.18)
-      .fillColor('#ffffff')
-      .fill()
-      .fillOpacity(1)
-      .font('Helvetica-Bold')
-      .fontSize(8)
-      .fillColor('#ffffff')
-      .text('D', linkX + 6, y + 15, { lineBreak: false });
-    doc.link(linkX, y + 10, 18, 18, node.data.specUrl);
-  }
-
-  let rowY = y + headerHeight + bodyPadding;
+  let rowY = y + nodeHeaderHeight + nodeBodyPadding;
 
   if (node.data.badges?.length) {
     let badgeX = x + 10;
     for (const badge of node.data.badges) {
-      badgeX += drawBadge(doc, badge, badgeX, rowY, '#9b1c15', colors.deprecated) + 6;
+      badgeX += drawBadge(doc, badge, badgeX, rowY + 2, colors.deprecatedText, colors.deprecated) + 6;
     }
-    rowY += 24;
+    rowY += nodeBadgeHeight;
   }
 
   if (!fields.length) {
@@ -287,53 +537,75 @@ function drawNode(doc: PDFKit.PDFDocument, node: MapNode): void {
       .fontSize(10)
       .fillColor(colors.muted)
       .text('empty message', x + 12, rowY + 8, { lineBreak: false });
-    return;
+  } else {
+    fields.forEach((field, index) => {
+      drawFieldRow(doc, node, field, index, x, rowY, width, context);
+      rowY += mapFieldRowHeight(field);
+    });
   }
 
-  fields.forEach((field, index) => {
-    const currentY = rowY + index * rowHeight;
-    if (index % 2 === 0) {
-      doc
-        .save()
-        .fillColor(colors.panelSoft)
-        .roundedRect(x + 8, currentY, width - 16, rowHeight - 2, 5)
-        .fill()
-        .restore();
+  drawHandle(doc, x - handleOffset, y + height / 2, handleFill(node));
+}
+
+function drawCanvasBackground(doc: PDFKit.PDFDocument, pageWidth: number, pageHeight: number): void {
+  doc.rect(0, 0, pageWidth, pageHeight).fill(colors.background);
+
+  doc
+    .save()
+    .fillOpacity(0.04)
+    .fillColor(colors.blue)
+    .rect(0, 0, pageWidth * 0.36, pageHeight)
+    .fill()
+    .fillColor(colors.teal)
+    .rect(0, pageHeight * 0.58, pageWidth, pageHeight * 0.42)
+    .fill()
+    .restore();
+
+  doc.save().fillColor(colors.grid).fillOpacity(0.62);
+  for (let x = gridGap; x < pageWidth; x += gridGap) {
+    for (let y = gridGap; y < pageHeight; y += gridGap) {
+      doc.circle(x, y, 0.55).fill();
     }
+  }
+  doc.restore();
+}
 
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(8.5)
-      .fillColor(colors.muted)
-      .text(trimText(field.type, 26), x + 14, currentY + 7, {
-        width: Math.floor(width * 0.43),
-        lineBreak: false,
-      });
-
-    const nameX = x + Math.floor(width * 0.46);
-    doc
-      .font('Courier-Bold')
-      .fontSize(8.5)
-      .fillColor(colors.text)
-      .text(trimText(field.name, 31), nameX, currentY + 7, {
-        width: width - (nameX - x) - 24,
-        lineBreak: false,
-      });
-
-    if (field.badge) {
-      const fill = field.badge === 'reserved' ? colors.reserved : colors.deprecated;
-      const textColor = field.badge === 'reserved' ? colors.gray : '#9b1c15';
-      drawBadge(doc, field.badge, x + width - 70, currentY + 6, textColor, fill);
-    }
-  });
+function drawTitle(doc: PDFKit.PDFDocument, pageWidth: number): void {
+  doc
+    .font('Helvetica-Bold')
+    .fontSize(26)
+    .fillColor(colors.text)
+    .text(`gNMI service ${mapSource.gnmiServiceVersion} map`, pageMargin, 18, {
+      width: pageWidth - pageMargin * 2,
+      lineBreak: false,
+    });
+  doc
+    .font('Helvetica')
+    .fontSize(12)
+    .fillColor(colors.muted)
+    .text(`Generated from openconfig/gnmi ${mapSource.gnmiTag} protobuf IDL`, pageMargin, 48, {
+      width: pageWidth - pageMargin * 2,
+      lineBreak: false,
+    });
 }
 
 async function main() {
-  const { nodes: pdfNodes, edges: pdfEdges } = getVisibleMap({
+  const { nodes, edges: pdfEdges } = getVisibleMap({
     showDeprecated: false,
     showExtensions: true,
   });
+  const pdfNodes = improveNodeLayout(nodes);
   const nodesById = new Map<string, MapNode>(pdfNodes.map((node) => [node.id, node]));
+  const bounds = mapNodesBounds(pdfNodes);
+  const pageWidth = bounds.width + pageMargin * 2;
+  const pageHeight = bounds.height + titleBandHeight + footerBandHeight;
+  const context: PdfContext = {
+    offset: {
+      x: pageMargin - bounds.x,
+      y: titleBandHeight - bounds.y,
+    },
+    connectedHandles: new Set(pdfEdges.map((edge) => `${edge.source}:${edge.sourceHandle}`)),
+  };
   const doc = new PDFDocument({
     autoFirstPage: false,
     compress: true,
@@ -345,38 +617,28 @@ async function main() {
     },
   });
 
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
   const stream = fs.createWriteStream(outputPath);
   doc.pipe(stream);
   doc.addPage({ size: [pageWidth, pageHeight], margin: 0 });
 
-  doc.rect(0, 0, pageWidth, pageHeight).fill(colors.background);
-
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(26)
-    .fillColor(colors.text)
-    .text(`gNMI service ${mapSource.gnmiServiceVersion} map`, margin, 18, { lineBreak: false });
-  doc
-    .font('Helvetica')
-    .fontSize(12)
-    .fillColor(colors.muted)
-    .text(`Generated from openconfig/gnmi ${mapSource.gnmiTag} protobuf IDL`, margin, 48, {
-      lineBreak: false,
-    });
+  drawCanvasBackground(doc, pageWidth, pageHeight);
+  drawTitle(doc, pageWidth);
 
   for (const edge of pdfEdges) {
-    drawEdge(doc, edge, nodesById);
+    drawEdge(doc, edge, nodesById, context);
   }
 
   for (const node of pdfNodes) {
-    drawNode(doc, node);
+    drawNode(doc, node, context);
   }
 
   doc
     .font('Helvetica')
     .fontSize(10)
     .fillColor(colors.muted)
-    .text('P = proto definition, D = specification documentation', margin, pageHeight - 32, {
+    .text('P = proto definition, D = specification documentation', pageMargin, pageHeight - 30, {
       lineBreak: false,
     });
 
@@ -386,11 +648,7 @@ async function main() {
     stream.on('error', reject);
   });
 
-  fs.mkdirSync(path.dirname(publicOutputPath), { recursive: true });
-  fs.copyFileSync(outputPath, publicOutputPath);
-
   console.log(`Wrote ${outputPath}`);
-  console.log(`Wrote ${publicOutputPath}`);
 }
 
 main().catch((error) => {
