@@ -81,6 +81,9 @@ type RoutedMapEdge = Edge<RoutedEdgeData, 'routed'> & {
   deprecated: boolean;
 };
 
+type FieldConnectionIds = Record<string, string>;
+type FieldClickHandler = (edgeId: string) => void;
+
 type RouteBridge = RoutePoint & {
   orientation: 'horizontal' | 'vertical';
 };
@@ -204,12 +207,31 @@ function AppShell() {
       selectedEdge ? new Set([selectedEdge.source, selectedEdge.target]) : new Set<string>(),
     [selectedEdge],
   );
+  const edgeIdBySourceHandle = useMemo(
+    () =>
+      new Map(
+        visibleMap.edges.map((edge) => [`${edge.source}:${edge.sourceHandle}`, edge.id] as const),
+      ),
+    [visibleMap.edges],
+  );
+  const selectFieldConnection = useCallback((edgeId: string) => {
+    setSelectedId(null);
+    setSelectedEdgeId(edgeId);
+  }, []);
 
   const nodes = useMemo(
     () =>
       displayedLayoutNodes.map((currentNode) => {
         const active = !query || nodeMatches.has(currentNode.id);
         const edgeEndpoint = selectedEdgeEndpointIds.has(currentNode.id);
+        const fieldConnectionIds = Object.fromEntries(
+          (currentNode.data.fields ?? [])
+            .map((field) => [
+              field.id,
+              edgeIdBySourceHandle.get(`${currentNode.id}:${field.id}`),
+            ])
+            .filter((entry): entry is [string, string] => Boolean(entry[1])),
+        );
 
         return {
           ...currentNode,
@@ -220,6 +242,8 @@ function AppShell() {
             edgeEndpoint,
             activeEdgeSourceHandle:
               selectedEdge?.source === currentNode.id ? selectedEdge.sourceHandle : null,
+            fieldConnectionIds,
+            onFieldConnectionClick: selectFieldConnection,
             query,
             showExtensions,
           },
@@ -228,7 +252,9 @@ function AppShell() {
     [
       nodeMatches,
       displayedLayoutNodes,
+      edgeIdBySourceHandle,
       query,
+      selectFieldConnection,
       selectedEdge,
       selectedEdgeEndpointIds,
       selectedId,
@@ -477,6 +503,8 @@ function SchemaNode({ data, selected }: NodeProps<MapNode>) {
   const fields = data.fields ?? [];
   const dimmed = data.active === false;
   const targetHandles = targetHandlesFromData(data);
+  const fieldConnectionIds = fieldConnectionIdsFromData(data);
+  const onFieldConnectionClick = fieldClickHandlerFromData(data);
   const activeEdgeSourceHandle =
     typeof data.activeEdgeSourceHandle === 'string' ? data.activeEdgeSourceHandle : null;
   const className = [
@@ -539,6 +567,8 @@ function SchemaNode({ data, selected }: NodeProps<MapNode>) {
               field={field}
               highlighted={fieldMatches(field, data.query ?? '')}
               edgeHighlighted={field.id === activeEdgeSourceHandle}
+              connectionEdgeId={fieldConnectionIds[field.id]}
+              onConnectionClick={onFieldConnectionClick}
               showExtensions={data.showExtensions}
             />
           ))
@@ -554,12 +584,27 @@ type FieldRowProps = {
   field: MapField;
   highlighted: boolean;
   edgeHighlighted: boolean;
+  connectionEdgeId?: string;
+  onConnectionClick?: FieldClickHandler;
   showExtensions?: boolean;
 };
 
-function FieldRow({ field, highlighted, edgeHighlighted, showExtensions }: FieldRowProps) {
+function FieldRow({
+  field,
+  highlighted,
+  edgeHighlighted,
+  connectionEdgeId,
+  onConnectionClick,
+  showExtensions,
+}: FieldRowProps) {
   const isExtension = field.ref === 'extension';
   const visibleExtensionHandle = !isExtension || showExtensions;
+  const clickable = Boolean(connectionEdgeId && onConnectionClick);
+  const selectConnection = () => {
+    if (connectionEdgeId && onConnectionClick) {
+      onConnectionClick(connectionEdgeId);
+    }
+  };
 
   return (
     <div
@@ -568,10 +613,30 @@ function FieldRow({ field, highlighted, edgeHighlighted, showExtensions }: Field
         field.ref ? 'has-ref' : '',
         highlighted ? 'is-highlighted' : '',
         edgeHighlighted ? 'is-edge-highlighted' : '',
+        clickable ? 'is-clickable nodrag nopan' : '',
         field.badge === 'deprecated' ? 'is-deprecated' : '',
       ]
         .filter(Boolean)
         .join(' ')}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      title={clickable ? `${field.name} -> ${field.ref}` : undefined}
+      aria-label={clickable ? `Highlight ${field.name} connection to ${field.ref}` : undefined}
+      onClick={(event) => {
+        if (!clickable) {
+          return;
+        }
+        event.stopPropagation();
+        selectConnection();
+      }}
+      onKeyDown={(event) => {
+        if (!clickable || (event.key !== 'Enter' && event.key !== ' ')) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        selectConnection();
+      }}
     >
       <span className="field-type">{field.type}</span>
       <span className="field-name">{field.name}</span>
@@ -868,6 +933,20 @@ function targetHandlesFromData(data: MapNode['data']): TargetHandleLayout[] {
   return Array.isArray(data.targetHandles)
     ? (data.targetHandles as TargetHandleLayout[])
     : [];
+}
+
+function fieldConnectionIdsFromData(data: MapNode['data']): FieldConnectionIds {
+  return data.fieldConnectionIds &&
+    typeof data.fieldConnectionIds === 'object' &&
+    !Array.isArray(data.fieldConnectionIds)
+    ? (data.fieldConnectionIds as FieldConnectionIds)
+    : {};
+}
+
+function fieldClickHandlerFromData(data: MapNode['data']): FieldClickHandler | undefined {
+  return typeof data.onFieldConnectionClick === 'function'
+    ? (data.onFieldConnectionClick as FieldClickHandler)
+    : undefined;
 }
 
 type InspectorProps = {

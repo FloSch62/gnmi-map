@@ -373,6 +373,17 @@ a {
   box-shadow: inset 0 0 0 1px #ecd676;
 }
 
+.field-row.is-clickable {
+  cursor: pointer;
+}
+
+.field-row.is-clickable:hover,
+.field-row.is-clickable:focus-visible {
+  background: #edf6ff;
+  box-shadow: inset 0 0 0 1px rgba(36, 116, 201, 0.34);
+  outline: none;
+}
+
 .field-row.is-edge-highlighted {
   background: #ffe4e8;
   box-shadow: inset 0 0 0 1px rgba(210, 31, 60, 0.44);
