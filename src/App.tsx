@@ -64,6 +64,8 @@ const edgeTypes: EdgeTypes = {
   routed: RoutedEdge,
 };
 
+const pdfMapUrl = `${import.meta.env.BASE_URL}gnmi_0.10.0_map.pdf`;
+
 type NodePosition = {
   x: number;
   y: number;
@@ -444,7 +446,7 @@ function AppShell() {
             Deprecated
           </button>
 
-          <a className="tool-button" href="/gnmi_0.10.0_map.pdf" target="_blank" rel="noreferrer">
+          <a className="tool-button" href={pdfMapUrl} target="_blank" rel="noreferrer">
             <FileDown size={16} aria-hidden="true" />
             PDF
           </a>

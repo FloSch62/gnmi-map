@@ -24,6 +24,19 @@ Open the dev-server URL printed by Vite. For a production build:
 npm run build
 ```
 
+## GitHub Pages
+
+The React Flow map deploys to GitHub Pages through `.github/workflows/pages.yml`.
+The workflow runs on pushes to `master` and can also be started manually from the Actions tab.
+
+Enable Pages in the repository settings with **Source: GitHub Actions**. After deployment, the default project Pages URL is:
+
+```text
+https://hellt.github.io/gnmi-map/
+```
+
+The workflow builds the Vite app into `dist/` and uses the Pages base path when generating asset URLs, so the app and PDF link work under `/gnmi-map/`.
+
 To refresh the generated React Flow map from the latest `openconfig/gnmi` tag:
 
 ```bash
