@@ -1,12 +1,19 @@
-import { getVisibleMap, mapEdges, mapNodes, mapSource } from '../src/gnmiMap.js';
+import {
+  getVisibleMap,
+  mapEdges,
+  mapNodes,
+  mapSource,
+  type MapEdge,
+  type MapNode,
+} from '../src/gnmiMap';
 
-function assert(condition, message) {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
     throw new Error(message);
   }
 }
 
-function validateEdges(nodes, edges, label) {
+function validateEdges(nodes: MapNode[], edges: MapEdge[], label: string): void {
   const nodeIds = new Set(nodes.map((node) => node.id));
   const handles = new Set(
     nodes.flatMap((node) => (node.data.fields ?? []).map((field) => `${node.id}:${field.id}`)),
@@ -22,7 +29,7 @@ function validateEdges(nodes, edges, label) {
   }
 }
 
-function validateLinks() {
+function validateLinks(): void {
   for (const node of mapNodes) {
     if (node.data.protoUrl?.startsWith('https://github.com/openconfig/gnmi/blob/')) {
       const validProtoBase =
@@ -40,17 +47,17 @@ function validateLinks() {
   }
 }
 
-function validateDeprecatedVisibility() {
+function validateDeprecatedVisibility(): void {
   const rawSubscribeResponse = mapNodes.find((node) => node.id === 'subscribe-response');
   assert(rawSubscribeResponse, 'raw map is missing SubscribeResponse');
-  const rawErrorField = rawSubscribeResponse.data.fields.find((field) => field.name === 'error');
+  const rawErrorField = rawSubscribeResponse.data.fields?.find((field) => field.name === 'error');
   assert(rawErrorField?.deprecated, 'raw SubscribeResponse.error must be preserved as deprecated');
 
   const defaultMap = getVisibleMap();
   const defaultSubscribeResponse = defaultMap.nodes.find((node) => node.id === 'subscribe-response');
   assert(defaultSubscribeResponse, 'default map is missing SubscribeResponse');
   assert(
-    !defaultSubscribeResponse.data.fields.some((field) => field.name === 'error'),
+    !(defaultSubscribeResponse.data.fields?.some((field) => field.name === 'error') ?? false),
     'default SubscribeResponse must hide deprecated error field',
   );
   assert(
@@ -67,7 +74,7 @@ function validateDeprecatedVisibility() {
     (node) => node.id === 'subscribe-response',
   );
   assert(
-    deprecatedSubscribeResponse?.data.fields.some((field) => field.name === 'error'),
+    deprecatedSubscribeResponse?.data.fields?.some((field) => field.name === 'error'),
     'deprecated map must include SubscribeResponse.error',
   );
 }

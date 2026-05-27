@@ -1,16 +1,55 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import protobuf from 'protobufjs';
-import { mapBounds, mapNodes as layoutNodes } from '../src/gnmiMap.js';
+import {
+  mapBounds,
+  mapNodes as layoutNodes,
+  type MapBounds,
+  type MapBadge,
+  type MapEdge,
+  type MapEdgeKind,
+  type MapField,
+  type MapNode,
+  type MapSource,
+} from '../src/gnmiMap';
 
 const GNMI_TAGS_API = 'https://api.github.com/repos/openconfig/gnmi/tags?per_page=30';
 const GNMI_GITHUB_BASE = 'https://github.com/openconfig/gnmi/blob';
 const GNMI_RAW_BASE = 'https://raw.githubusercontent.com/openconfig/gnmi';
 const SPECBASE =
   'https://github.com/openconfig/reference/blob/master/rpc/gnmi/gnmi-specification.md';
-const OUTPUT_PATH = path.resolve('src/gnmiMap.js');
+const OUTPUT_PATH = path.resolve('src/gnmiMap.ts');
 
-const SCALAR_TYPES = new Set([
+type Definition = protobuf.Type | protobuf.Enum;
+type Definitions = Map<string, Definition>;
+type ByShortName = Map<string, string[]>;
+type DefinitionLineStackEntry = {
+  name: string;
+  depth: number;
+};
+type ProtoNamespace = protobuf.ReflectionObject & {
+  nested?: Record<string, protobuf.ReflectionObject>;
+};
+type ProtoField = protobuf.Field & {
+  keyType?: string;
+};
+type SourceKind = 'gnmi' | 'gnmi_ext';
+type LinesBySource = Record<SourceKind, Map<string, number>>;
+type SymbolMaps = {
+  nodeIdToSymbol: Map<string, string>;
+  symbolToNodeId: Map<string, string>;
+};
+type GitHubTag = {
+  name: string;
+};
+type GeneratedSourceInput = {
+  nodes: MapNode[];
+  edges: MapEdge[];
+  bounds: MapBounds;
+  source: MapSource;
+};
+
+const SCALAR_TYPES = new Set<string>([
   'bool',
   'bytes',
   'double',
@@ -28,22 +67,22 @@ const SCALAR_TYPES = new Set([
   'uint64',
 ]);
 
-const EXTERNAL_REFS = new Map([
+const EXTERNAL_REFS = new Map<string, string>([
   ['google.protobuf.Any', 'any'],
   ['google.protobuf.Duration', 'duration'],
 ]);
 
-async function fetchJson(url) {
+async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, {
     headers: { Accept: 'application/vnd.github+json' },
   });
   if (!response.ok) {
     throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
   }
-  return response.json();
+  return response.json() as Promise<T>;
 }
 
-async function fetchText(url) {
+async function fetchText(url: string): Promise<string> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
@@ -51,13 +90,13 @@ async function fetchText(url) {
   return response.text();
 }
 
-function stripLineComment(line) {
+function stripLineComment(line: string): string {
   return line.replace(/\/\/.*$/, '');
 }
 
-function definitionLines(protoText) {
-  const lines = new Map();
-  const stack = [];
+function definitionLines(protoText: string): Map<string, number> {
+  const lines = new Map<string, number>();
+  const stack: DefinitionLineStackEntry[] = [];
   let packageName = '';
   let depth = 0;
 
@@ -92,8 +131,8 @@ function definitionLines(protoText) {
   return lines;
 }
 
-function methodLines(protoText) {
-  const lines = new Map();
+function methodLines(protoText: string): Map<string, number> {
+  const lines = new Map<string, number>();
   protoText.split('\n').forEach((line, index) => {
     const match = stripLineComment(line).match(/^\s*rpc\s+([A-Za-z_][A-Za-z0-9_]*)\b/);
     if (match) {
@@ -103,7 +142,7 @@ function methodLines(protoText) {
   return lines;
 }
 
-function kebab(value) {
+function kebab(value: string): string {
   return value
     .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
     .replace(/_/g, '-')
@@ -111,14 +150,14 @@ function kebab(value) {
     .toLowerCase();
 }
 
-function titleFromNode(node) {
+function titleFromNode(node: MapNode): string {
   return node.data.label.replace(/^enum\s+/, '');
 }
 
-function collectDefinitions(root) {
-  const definitions = new Map();
+function collectDefinitions(root: protobuf.Root): Definitions {
+  const definitions: Definitions = new Map();
 
-  function visit(namespace) {
+  function visit(namespace: ProtoNamespace): void {
     if (!namespace.nested) {
       return;
     }
@@ -127,7 +166,7 @@ function collectDefinitions(root) {
       if (item instanceof protobuf.Type || item instanceof protobuf.Enum) {
         definitions.set(item.fullName.replace(/^\./, ''), item);
       }
-      visit(item);
+      visit(item as ProtoNamespace);
     });
   }
 
@@ -135,16 +174,16 @@ function collectDefinitions(root) {
   return definitions;
 }
 
-function groupByShortName(definitions) {
-  const byShort = new Map();
+function groupByShortName(definitions: Definitions): ByShortName {
+  const byShort: ByShortName = new Map();
   definitions.forEach((definition, fullName) => {
-    const shortName = fullName.split('.').at(-1);
+    const shortName = fullName.split('.').at(-1) ?? fullName;
     byShort.set(shortName, [...(byShort.get(shortName) ?? []), fullName]);
   });
   return byShort;
 }
 
-function specUrlFromLayout(node) {
+function specUrlFromLayout(node: MapNode): string | undefined {
   if (!node.data.specUrl) {
     return undefined;
   }
@@ -152,7 +191,11 @@ function specUrlFromLayout(node) {
   return hash ? `${SPECBASE}#${hash}` : SPECBASE;
 }
 
-function resolveSymbol(node, definitions, byShortName) {
+function resolveSymbol(
+  node: MapNode,
+  definitions: Definitions,
+  byShortName: ByShortName,
+): string | null {
   if (node.data.sourceSymbol) {
     return node.data.sourceSymbol;
   }
@@ -184,23 +227,28 @@ function resolveSymbol(node, definitions, byShortName) {
   return null;
 }
 
-function displayType(field) {
-  const base = field.map ? `map<${field.keyType},${field.type}>` : field.type;
+function displayType(field: ProtoField): string {
+  const base = field.map ? `map<${field.keyType ?? 'string'},${field.type}>` : field.type;
   return field.repeated ? `repeated ${base}` : base;
 }
 
-function resolveFieldRef(field, currentSymbol, symbolToNodeId, byShortName) {
+function resolveFieldRef(
+  field: ProtoField,
+  currentSymbol: string,
+  symbolToNodeId: Map<string, string>,
+  byShortName: ByShortName,
+): string | null {
   if (field.map || SCALAR_TYPES.has(field.type)) {
     return null;
   }
 
   if (EXTERNAL_REFS.has(field.type)) {
-    return EXTERNAL_REFS.get(field.type);
+    return EXTERNAL_REFS.get(field.type) ?? null;
   }
 
   const currentParts = currentSymbol.split('.');
   const packageName = currentParts[0];
-  const candidates = [];
+  const candidates: string[] = [];
 
   if (field.type.includes('.')) {
     candidates.push(field.type);
@@ -211,12 +259,12 @@ function resolveFieldRef(field, currentSymbol, symbolToNodeId, byShortName) {
   }
 
   const target = candidates.find((candidate) => symbolToNodeId.has(candidate));
-  return target ? symbolToNodeId.get(target) : null;
+  return target ? (symbolToNodeId.get(target) ?? null) : null;
 }
 
-function reservedFields(type) {
-  const numbers = [];
-  const names = [];
+function reservedFields(type: protobuf.Type): MapField[] {
+  const numbers: string[] = [];
+  const names: string[] = [];
 
   for (const item of type.reserved ?? []) {
     if (Array.isArray(item)) {
@@ -242,9 +290,14 @@ function reservedFields(type) {
   });
 }
 
-function fieldData(field, currentSymbol, symbolToNodeId, byShortName) {
+function fieldData(
+  field: ProtoField,
+  currentSymbol: string,
+  symbolToNodeId: Map<string, string>,
+  byShortName: ByShortName,
+): MapField {
   const deprecated = Boolean(field.options?.deprecated);
-  const data = {
+  const data: MapField = {
     id: kebab(field.name),
     type: displayType(field),
     name: field.name,
@@ -264,7 +317,7 @@ function fieldData(field, currentSymbol, symbolToNodeId, byShortName) {
   return data;
 }
 
-function enumFields(enumDefinition) {
+function enumFields(enumDefinition: protobuf.Enum): MapField[] {
   return Object.entries(enumDefinition.values).map(([name, value]) => ({
     id: kebab(name.replace(/^EID_/, '')),
     type: `${value}`,
@@ -273,7 +326,7 @@ function enumFields(enumDefinition) {
   }));
 }
 
-function protoUrl(source, line, gnmiTag) {
+function protoUrl(source: SourceKind, line: number | undefined, gnmiTag: string): string | undefined {
   if (!line) {
     return undefined;
   }
@@ -283,9 +336,13 @@ function protoUrl(source, line, gnmiTag) {
   return `${GNMI_GITHUB_BASE}/${gnmiTag}/${file}#L${line}`;
 }
 
-function buildSymbolMaps(nodes, definitions, byShortName) {
-  const symbolToNodeId = new Map();
-  const nodeIdToSymbol = new Map();
+function buildSymbolMaps(
+  nodes: MapNode[],
+  definitions: Definitions,
+  byShortName: ByShortName,
+): SymbolMaps {
+  const symbolToNodeId = new Map<string, string>();
+  const nodeIdToSymbol = new Map<string, string>();
 
   nodes.forEach((node) => {
     const symbol = resolveSymbol(node, definitions, byShortName);
@@ -299,7 +356,13 @@ function buildSymbolMaps(nodes, definitions, byShortName) {
   return { nodeIdToSymbol, symbolToNodeId };
 }
 
-function serviceNode(node, service, serviceLine, serviceVersion, gnmiTag) {
+function serviceNode(
+  node: MapNode,
+  service: protobuf.Service,
+  serviceLine: number | undefined,
+  serviceVersion: string,
+  gnmiTag: string,
+): MapNode {
   const methods = service.methodsArray;
   return {
     ...node,
@@ -315,14 +378,22 @@ function serviceNode(node, service, serviceLine, serviceVersion, gnmiTag) {
         type: 'rpc',
         name: method.name,
         ref: `rpc-${kebab(method.name)}`,
-        ...(method.requestStream || method.responseStream ? { badge: 'stream' } : {}),
+        ...(method.requestStream || method.responseStream ? { badge: 'stream' as const } : {}),
       })),
     },
   };
 }
 
-function rpcNode(node, service, rpcLines, gnmiTag) {
-  const methodName = node.id.replace(/^rpc-/, '').replace(/(^|-)([a-z])/g, (_, __, letter) =>
+function rpcNode(
+  node: MapNode,
+  service: protobuf.Service,
+  rpcLines: Map<string, number>,
+  gnmiTag: string,
+): MapNode {
+  const methodName = node.id.replace(
+    /^rpc-/,
+    '',
+  ).replace(/(^|-)([a-z])/g, (_match: string, _separator: string, letter: string) =>
     letter.toUpperCase(),
   );
   const method = service.methods[methodName];
@@ -358,15 +429,15 @@ function rpcNode(node, service, rpcLines, gnmiTag) {
 }
 
 function schemaNode(
-  node,
-  definition,
-  symbol,
-  symbolToNodeId,
-  byShortName,
-  linesBySource,
-  gnmiTag,
-) {
-  const source = symbol.startsWith('gnmi_ext.') ? 'gnmi_ext' : 'gnmi';
+  node: MapNode,
+  definition: Definition,
+  symbol: string,
+  symbolToNodeId: Map<string, string>,
+  byShortName: ByShortName,
+  linesBySource: LinesBySource,
+  gnmiTag: string,
+): MapNode {
+  const source: SourceKind = symbol.startsWith('gnmi_ext.') ? 'gnmi_ext' : 'gnmi';
   const fields =
     definition instanceof protobuf.Type
       ? [
@@ -378,7 +449,7 @@ function schemaNode(
       : enumFields(definition);
   const deprecated = Boolean(definition.options?.deprecated);
   const badges = deprecated
-    ? [...new Set([...(node.data.badges ?? []), 'deprecated'])]
+    ? [...new Set<MapBadge>([...(node.data.badges ?? []), 'deprecated'])]
     : node.data.badges?.filter((badge) => badge !== 'deprecated');
 
   return {
@@ -398,7 +469,7 @@ function schemaNode(
   };
 }
 
-function edgeKind(sourceNode, field, targetNode) {
+function edgeKind(sourceNode: MapNode, field: MapField, targetNode: MapNode): MapEdgeKind {
   if (field.type === 'rpc') {
     return 'rpc';
   }
@@ -414,9 +485,9 @@ function edgeKind(sourceNode, field, targetNode) {
   return 'field';
 }
 
-function buildEdges(nodes) {
-  const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const edges = [];
+function buildEdges(nodes: MapNode[]): MapEdge[] {
+  const nodesById = new Map<string, MapNode>(nodes.map((node) => [node.id, node]));
+  const edges: MapEdge[] = [];
 
   for (const node of nodes) {
     for (const field of node.data.fields ?? []) {
@@ -424,6 +495,9 @@ function buildEdges(nodes) {
         continue;
       }
       const targetNode = nodesById.get(field.ref);
+      if (!targetNode) {
+        continue;
+      }
       const kind = edgeKind(node, field, targetNode);
       edges.push({
         id: `${node.id}:${field.id}->${field.ref}`,
@@ -439,20 +513,82 @@ function buildEdges(nodes) {
   return edges;
 }
 
-function generatedSource({ nodes, edges, bounds, source }) {
-  return `// Generated by scripts/generate-map-data.mjs. Do not edit by hand.\n\nexport const mapSource = ${JSON.stringify(
+const GENERATED_TYPE_DEFINITIONS = `import type { Edge, Node } from '@xyflow/react';
+
+export type MapNodeKind = 'service' | 'rpc' | 'message' | 'enum' | 'external' | 'legend';
+export type MapEdgeKind = 'rpc' | 'field' | 'extension' | 'extension-detail';
+export type MapBadge = 'stream' | 'optional' | 'deprecated' | 'reserved';
+
+export type MapSource = {
+  gnmiTag: string;
+  gnmiServiceVersion: string;
+  gnmiBase: string;
+  extBase: string;
+  specBase: string;
+};
+
+export type MapBounds = {
+  width: number;
+  height: number;
+};
+
+export type MapField = {
+  id: string;
+  type: string;
+  name: string;
+  ref?: string | null;
+  group?: string;
+  badge?: MapBadge;
+  deprecated?: boolean;
+};
+
+export type MapNodeData = Record<string, unknown> & {
+  id: string;
+  kind: MapNodeKind;
+  label: string;
+  sourceSymbol?: string;
+  deprecated?: boolean;
+  protoUrl?: string;
+  specUrl?: string;
+  fields?: MapField[];
+  badges?: MapBadge[];
+  active?: boolean;
+  query?: string;
+  showExtensions?: boolean;
+};
+
+export type MapNode = Node<MapNodeData, 'schema'>;
+
+export type MapEdge = Edge<Record<string, never>, 'smoothstep'> & {
+  sourceHandle: string;
+  kind: MapEdgeKind;
+  deprecated: boolean;
+};
+
+export type VisibleMapOptions = {
+  showDeprecated?: boolean;
+  showExtensions?: boolean;
+};
+
+export type VisibleMap = {
+  nodes: MapNode[];
+  edges: MapEdge[];
+};`;
+
+function generatedSource({ nodes, edges, bounds, source }: GeneratedSourceInput): string {
+  return `// Generated by scripts/generate-map-data.ts. Do not edit by hand.\n\n${GENERATED_TYPE_DEFINITIONS}\n\nexport const mapSource: MapSource = ${JSON.stringify(
     source,
     null,
     2,
-  )};\n\nexport const mapNodes = ${JSON.stringify(nodes, null, 2)};\n\nexport const mapEdges = ${JSON.stringify(
+  )};\n\nexport const mapNodes: MapNode[] = ${JSON.stringify(nodes, null, 2)};\n\nexport const mapEdges: MapEdge[] = ${JSON.stringify(
     edges,
     null,
     2,
-  )};\n\nexport const mapBounds = ${JSON.stringify(bounds, null, 2)};\n\nexport function getVisibleMap({ showDeprecated = false, showExtensions = true } = {}) {\n  const visibleNodes = mapNodes\n    .filter((node) => showDeprecated || !node.data.deprecated)\n    .map((node) => ({\n      ...node,\n      data: {\n        ...node.data,\n        fields: (node.data.fields ?? []).filter((field) => showDeprecated || !field.deprecated),\n      },\n    }));\n  const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));\n  const visibleHandles = new Set(\n    visibleNodes.flatMap((node) =>\n      (node.data.fields ?? []).map((field) => \`\${node.id}:\${field.id}\`),\n    ),\n  );\n  const visibleEdges = mapEdges.filter((edge) => {\n    if (!showExtensions && edge.kind === 'extension') {\n      return false;\n    }\n    if (!showDeprecated && edge.deprecated) {\n      return false;\n    }\n    return (\n      visibleNodeIds.has(edge.source) &&\n      visibleNodeIds.has(edge.target) &&\n      visibleHandles.has(\`\${edge.source}:\${edge.sourceHandle}\`)\n    );\n  });\n\n  return { nodes: visibleNodes, edges: visibleEdges };\n}\n`;
+  )};\n\nexport const mapBounds: MapBounds = ${JSON.stringify(bounds, null, 2)};\n\nexport function getVisibleMap({\n  showDeprecated = false,\n  showExtensions = true,\n}: VisibleMapOptions = {}): VisibleMap {\n  const visibleNodes = mapNodes\n    .filter((node) => showDeprecated || !node.data.deprecated)\n    .map((node) => ({\n      ...node,\n      data: {\n        ...node.data,\n        fields: (node.data.fields ?? []).filter((field) => showDeprecated || !field.deprecated),\n      },\n    }));\n  const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));\n  const visibleHandles = new Set(\n    visibleNodes.flatMap((node) =>\n      (node.data.fields ?? []).map((field) => \`\${node.id}:\${field.id}\`),\n    ),\n  );\n  const visibleEdges = mapEdges.filter((edge) => {\n    if (!showExtensions && edge.kind === 'extension') {\n      return false;\n    }\n    if (!showDeprecated && edge.deprecated) {\n      return false;\n    }\n    return (\n      visibleNodeIds.has(edge.source) &&\n      visibleNodeIds.has(edge.target) &&\n      visibleHandles.has(\`\${edge.source}:\${edge.sourceHandle}\`)\n    );\n  });\n\n  return { nodes: visibleNodes, edges: visibleEdges };\n}\n`;
 }
 
 async function main() {
-  const tags = await fetchJson(GNMI_TAGS_API);
+  const tags = await fetchJson<GitHubTag[]>(GNMI_TAGS_API);
   const latestTag = tags.find((tag) => /^v\d+\.\d+\.\d+$/.test(tag.name));
   if (!latestTag) {
     throw new Error('Could not resolve latest openconfig/gnmi tag');
@@ -475,14 +611,21 @@ async function main() {
     byShortName,
   );
   const service = root.lookupService('gnmi.gNMI');
-  const serviceVersion = root.nested.gnmi.options['(gnmi_service)'];
-  const linesBySource = {
+  const gnmiNamespace = root.lookup('gnmi');
+  if (!gnmiNamespace) {
+    throw new Error('Could not resolve gNMI namespace');
+  }
+  const serviceVersion = gnmiNamespace.options?.['(gnmi_service)'];
+  if (typeof serviceVersion !== 'string') {
+    throw new Error('Could not resolve gNMI service version');
+  }
+  const linesBySource: LinesBySource = {
     gnmi: definitionLines(gnmiProto),
     gnmi_ext: definitionLines(extProto),
   };
   const rpcLines = methodLines(gnmiProto);
 
-  const nodes = layoutNodes.map((node) => {
+  const nodes: MapNode[] = layoutNodes.map((node) => {
     if (node.id === 'service-gnmi') {
       return serviceNode(node, service, linesBySource.gnmi.get('gnmi.gNMI'), serviceVersion, gnmiTag);
     }
@@ -492,9 +635,13 @@ async function main() {
 
     const symbol = nodeIdToSymbol.get(node.id);
     if (symbol) {
+      const definition = definitions.get(symbol);
+      if (!definition) {
+        return node;
+      }
       return schemaNode(
         node,
-        definitions.get(symbol),
+        definition,
         symbol,
         symbolToNodeId,
         byShortName,
@@ -514,7 +661,7 @@ async function main() {
     };
   });
   const edges = buildEdges(nodes);
-  const source = {
+  const source: MapSource = {
     gnmiTag,
     gnmiServiceVersion: serviceVersion,
     gnmiBase: `${GNMI_GITHUB_BASE}/${gnmiTag}/proto/gnmi/gnmi.proto`,

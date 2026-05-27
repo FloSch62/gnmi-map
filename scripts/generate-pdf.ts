@@ -1,7 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import PDFDocument from 'pdfkit';
-import { getVisibleMap, mapBounds, mapSource } from '../src/gnmiMap.js';
+import {
+  getVisibleMap,
+  mapBounds,
+  mapSource,
+  type MapEdge,
+  type MapEdgeKind,
+  type MapNode,
+  type MapNodeKind,
+} from '../src/gnmiMap';
 
 const outputPath = path.resolve('gnmi_0.10.0_map.pdf');
 const publicOutputPath = path.resolve('public/gnmi_0.10.0_map.pdf');
@@ -28,7 +36,12 @@ const colors = {
   deprecated: '#fee2df',
 };
 
-const headerColors = {
+type Point = {
+  x: number;
+  y: number;
+};
+
+const headerColors: Record<MapNodeKind, string> = {
   service: colors.blue,
   rpc: colors.rpc,
   enum: colors.amber,
@@ -37,25 +50,26 @@ const headerColors = {
   message: colors.teal,
 };
 
-const edgeColors = {
+const edgeColors: Record<MapEdgeKind, string> = {
   rpc: '#0b4b8f',
   field: '#5b708a',
   extension: '#8a6a1f',
   'extension-detail': '#b47a18',
 };
 
-function nodeWidth(node) {
-  return node.style?.width ?? 320;
+function nodeWidth(node: MapNode): number {
+  const width = node.style?.width;
+  return typeof width === 'number' ? width : 320;
 }
 
-function nodeHeight(node) {
+function nodeHeight(node: MapNode): number {
   const fields = node.data.fields ?? [];
   const badgeHeight = node.data.badges?.length ? 24 : 0;
   const rows = Math.max(fields.length, 1);
   return headerHeight + badgeHeight + bodyPadding * 2 + rows * rowHeight;
 }
 
-function sourcePoint(node, handleId) {
+function sourcePoint(node: MapNode, handleId: string): Point {
   const fields = node.data.fields ?? [];
   const index = Math.max(
     0,
@@ -75,14 +89,14 @@ function sourcePoint(node, handleId) {
   };
 }
 
-function targetPoint(node) {
+function targetPoint(node: MapNode): Point {
   return {
     x: node.position.x,
     y: node.position.y + nodeHeight(node) / 2,
   };
 }
 
-function trimText(value, limit) {
+function trimText(value: string, limit: number): string {
   if (value.length <= limit) {
     return value;
   }
@@ -90,7 +104,13 @@ function trimText(value, limit) {
   return `${value.slice(0, limit - 1)}...`;
 }
 
-function drawArrow(doc, x, y, angle, color) {
+function drawArrow(
+  doc: PDFKit.PDFDocument,
+  x: number,
+  y: number,
+  angle: number,
+  color: string,
+): void {
   const size = 8;
   doc
     .save()
@@ -109,7 +129,11 @@ function drawArrow(doc, x, y, angle, color) {
     .restore();
 }
 
-function drawEdge(doc, edge, nodesById) {
+function drawEdge(
+  doc: PDFKit.PDFDocument,
+  edge: MapEdge,
+  nodesById: Map<string, MapNode>,
+): void {
   const source = nodesById.get(edge.source);
   const target = nodesById.get(edge.target);
   if (!source || !target) {
@@ -151,7 +175,14 @@ function drawEdge(doc, edge, nodesById) {
   doc.restore();
 }
 
-function drawBadge(doc, text, x, y, color, fill) {
+function drawBadge(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  x: number,
+  y: number,
+  color: string,
+  fill: string,
+): number {
   const width = Math.max(46, doc.widthOfString(text) + 12);
   doc
     .save()
@@ -166,7 +197,7 @@ function drawBadge(doc, text, x, y, color, fill) {
   return width;
 }
 
-function drawNode(doc, node) {
+function drawNode(doc: PDFKit.PDFDocument, node: MapNode): void {
   const x = node.position.x + margin;
   const y = node.position.y + margin;
   const width = nodeWidth(node);
@@ -302,7 +333,7 @@ async function main() {
     showDeprecated: false,
     showExtensions: true,
   });
-  const nodesById = new Map(pdfNodes.map((node) => [node.id, node]));
+  const nodesById = new Map<string, MapNode>(pdfNodes.map((node) => [node.id, node]));
   const doc = new PDFDocument({
     autoFirstPage: false,
     compress: true,
@@ -350,7 +381,7 @@ async function main() {
     });
 
   doc.end();
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     stream.on('finish', resolve);
     stream.on('error', reject);
   });

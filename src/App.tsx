@@ -1,10 +1,12 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import { type CSSProperties, useCallback, useMemo, useState } from 'react';
 import {
   Background,
   Controls,
   Handle,
   MarkerType,
   MiniMap,
+  type NodeProps,
+  type NodeTypes,
   Position,
   ReactFlow,
   ReactFlowProvider,
@@ -21,9 +23,17 @@ import {
   GitBranch,
   Search,
 } from 'lucide-react';
-import { getVisibleMap, mapBounds, mapSource } from './gnmiMap.js';
+import {
+  getVisibleMap,
+  type MapEdge,
+  type MapEdgeKind,
+  type MapField,
+  type MapNode,
+  type MapNodeKind,
+  mapSource,
+} from './gnmiMap';
 
-const edgeStyleByKind = {
+const edgeStyleByKind: Record<MapEdgeKind, CSSProperties> = {
   rpc: { stroke: '#0b4b8f', strokeWidth: 2.2 },
   field: { stroke: '#5b708a', strokeWidth: 1.6 },
   extension: {
@@ -34,11 +44,11 @@ const edgeStyleByKind = {
   'extension-detail': { stroke: '#b47a18', strokeWidth: 1.5 },
 };
 
-const nodeTypes = {
+const nodeTypes: NodeTypes = {
   schema: SchemaNode,
 };
 
-function searchableText(node) {
+function searchableText(node: MapNode): string {
   const fieldText = node.data.fields
     ?.map((field) => `${field.type} ${field.name} ${field.group ?? ''} ${field.badge ?? ''}`)
     .join(' ');
@@ -46,7 +56,7 @@ function searchableText(node) {
   return `${node.data.kind} ${node.data.label} ${fieldText ?? ''}`.toLowerCase();
 }
 
-function fieldMatches(field, query) {
+function fieldMatches(field: MapField, query: string): boolean {
   if (!query) {
     return false;
   }
@@ -57,11 +67,11 @@ function fieldMatches(field, query) {
 }
 
 function AppShell() {
-  const { fitView } = useReactFlow();
+  const { fitView } = useReactFlow<MapNode, MapEdge>();
   const [queryValue, setQueryValue] = useState('');
   const [showExtensions, setShowExtensions] = useState(false);
   const [showDeprecated, setShowDeprecated] = useState(false);
-  const [selectedId, setSelectedId] = useState(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const query = queryValue.trim().toLowerCase();
   const visibleMap = useMemo(
@@ -71,7 +81,7 @@ function AppShell() {
 
   const nodeMatches = useMemo(() => {
     if (!query) {
-      return new Set();
+      return new Set<string>();
     }
 
     return new Set(
@@ -98,7 +108,7 @@ function AppShell() {
     [nodeMatches, query, showExtensions, visibleMap.nodes],
   );
 
-  const edges = useMemo(
+  const edges = useMemo<MapEdge[]>(
     () =>
       visibleMap.edges.map((edge) => {
         const connectedToMatch =
@@ -107,7 +117,7 @@ function AppShell() {
 
         return {
           ...edge,
-          type: 'smoothstep',
+          type: 'smoothstep' as const,
           className: `flow-edge flow-edge-${edge.kind}`,
           markerEnd: { type: MarkerType.ArrowClosed, color: style.stroke },
           animated: query ? connectedToMatch : edge.kind === 'rpc',
@@ -181,7 +191,7 @@ function AppShell() {
       </header>
 
       <main className="map-stage">
-        <ReactFlow
+        <ReactFlow<MapNode, MapEdge>
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}
@@ -196,7 +206,7 @@ function AppShell() {
         >
           <Background color="#c4ced9" gap={34} size={1.1} />
           <Controls position="bottom-left" />
-          <MiniMap
+          <MiniMap<MapNode>
             position="bottom-right"
             pannable
             zoomable
@@ -215,7 +225,7 @@ function AppShell() {
   );
 }
 
-function SchemaNode({ data, selected }) {
+function SchemaNode({ data, selected }: NodeProps<MapNode>) {
   const fields = data.fields ?? [];
   const dimmed = data.active === false;
   const className = [
@@ -262,7 +272,7 @@ function SchemaNode({ data, selected }) {
             <FieldRow
               key={field.id}
               field={field}
-              highlighted={fieldMatches(field, data.query)}
+              highlighted={fieldMatches(field, data.query ?? '')}
               showExtensions={data.showExtensions}
             />
           ))
@@ -274,7 +284,13 @@ function SchemaNode({ data, selected }) {
   );
 }
 
-function FieldRow({ field, highlighted, showExtensions }) {
+type FieldRowProps = {
+  field: MapField;
+  highlighted: boolean;
+  showExtensions?: boolean;
+};
+
+function FieldRow({ field, highlighted, showExtensions }: FieldRowProps) {
   const isExtension = field.ref === 'extension';
   const visibleExtensionHandle = !isExtension || showExtensions;
 
@@ -306,7 +322,13 @@ function FieldRow({ field, highlighted, showExtensions }) {
   );
 }
 
-function Inspector({ node, totalNodes, totalEdges }) {
+type InspectorProps = {
+  node?: MapNode;
+  totalNodes: number;
+  totalEdges: number;
+};
+
+function Inspector({ node, totalNodes, totalEdges }: InspectorProps) {
   if (!node) {
     return (
       <aside className="inspector">
@@ -355,7 +377,7 @@ function Inspector({ node, totalNodes, totalEdges }) {
   );
 }
 
-function minimapColor(kind) {
+function minimapColor(kind: MapNodeKind): string {
   if (kind === 'service') {
     return '#0b4b8f';
   }
@@ -377,7 +399,7 @@ function minimapColor(kind) {
 export default function App() {
   return (
     <ReactFlowProvider>
-      <AppShell bounds={mapBounds} />
+      <AppShell />
     </ReactFlowProvider>
   );
 }
