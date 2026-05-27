@@ -5,17 +5,22 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "build:map": "node scripts/generate-map-data.mjs",
     "build": "vite build",
+    "build:pdf": "node scripts/generate-pdf.mjs",
+    "test:map": "node scripts/validate-map.mjs",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
     "@xyflow/react": "^12.8.4",
     "lucide-react": "^0.468.0",
+    "pdfkit": "^0.18.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "protobufjs": "^8.4.2",
     "vite": "^6.0.7"
   }
 }

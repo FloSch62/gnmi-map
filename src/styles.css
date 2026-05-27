@@ -280,6 +280,11 @@ a {
   color: #744200;
 }
 
+.badge-reserved {
+  background: #e7ebf0;
+  color: #4d5a6b;
+}
+
 .field-group {
   background: var(--blue-soft);
   color: #164675;

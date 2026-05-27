@@ -14,13 +14,14 @@ import '@xyflow/react/dist/style.css';
 import {
   BookOpen,
   ExternalLink,
+  EyeOff,
   FileCode2,
   FileDown,
   Focus,
   GitBranch,
   Search,
 } from 'lucide-react';
-import { mapBounds, mapEdges, mapNodes } from './gnmiMap.js';
+import { getVisibleMap, mapBounds, mapSource } from './gnmiMap.js';
 
 const edgeStyleByKind = {
   rpc: { stroke: '#0b4b8f', strokeWidth: 2.2 },
@@ -59,9 +60,14 @@ function AppShell() {
   const { fitView } = useReactFlow();
   const [queryValue, setQueryValue] = useState('');
   const [showExtensions, setShowExtensions] = useState(false);
+  const [showDeprecated, setShowDeprecated] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
 
   const query = queryValue.trim().toLowerCase();
+  const visibleMap = useMemo(
+    () => getVisibleMap({ showDeprecated, showExtensions }),
+    [showDeprecated, showExtensions],
+  );
 
   const nodeMatches = useMemo(() => {
     if (!query) {
@@ -69,15 +75,15 @@ function AppShell() {
     }
 
     return new Set(
-      mapNodes
+      visibleMap.nodes
         .filter((currentNode) => searchableText(currentNode).includes(query))
         .map((currentNode) => currentNode.id),
     );
-  }, [query]);
+  }, [query, visibleMap.nodes]);
 
   const nodes = useMemo(
     () =>
-      mapNodes.map((currentNode) => {
+      visibleMap.nodes.map((currentNode) => {
         const active = !query || nodeMatches.has(currentNode.id);
         return {
           ...currentNode,
@@ -89,37 +95,29 @@ function AppShell() {
           },
         };
       }),
-    [nodeMatches, query, showExtensions],
+    [nodeMatches, query, showExtensions, visibleMap.nodes],
   );
 
   const edges = useMemo(
     () =>
-      mapEdges
-        .filter((edge) => {
-          if (showExtensions) {
-            return true;
-          }
+      visibleMap.edges.map((edge) => {
+        const connectedToMatch =
+          !query || nodeMatches.has(edge.source) || nodeMatches.has(edge.target);
+        const style = edgeStyleByKind[edge.kind] ?? edgeStyleByKind.field;
 
-          return edge.kind !== 'extension';
-        })
-        .map((edge) => {
-          const connectedToMatch =
-            !query || nodeMatches.has(edge.source) || nodeMatches.has(edge.target);
-          const style = edgeStyleByKind[edge.kind] ?? edgeStyleByKind.field;
-
-          return {
-            ...edge,
-            type: 'smoothstep',
-            className: `flow-edge flow-edge-${edge.kind}`,
-            markerEnd: { type: MarkerType.ArrowClosed, color: style.stroke },
-            animated: query ? connectedToMatch : edge.kind === 'rpc',
-            style: {
-              ...style,
-              opacity: connectedToMatch ? 1 : 0.12,
-            },
-          };
-        }),
-    [nodeMatches, query, showExtensions],
+        return {
+          ...edge,
+          type: 'smoothstep',
+          className: `flow-edge flow-edge-${edge.kind}`,
+          markerEnd: { type: MarkerType.ArrowClosed, color: style.stroke },
+          animated: query ? connectedToMatch : edge.kind === 'rpc',
+          style: {
+            ...style,
+            opacity: connectedToMatch ? 1 : 0.12,
+          },
+        };
+      }),
+    [nodeMatches, query, visibleMap.edges],
   );
 
   const selectedNode = useMemo(
@@ -135,7 +133,7 @@ function AppShell() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-kicker">gNMI 0.7.0</span>
+          <span className="brand-kicker">gNMI service {mapSource.gnmiServiceVersion}</span>
           <h1>React Flow Map</h1>
         </div>
 
@@ -165,7 +163,17 @@ function AppShell() {
             Extensions
           </button>
 
-          <a className="tool-button" href="/gnmi_0.7.0_map.pdf" target="_blank" rel="noreferrer">
+          <button
+            className={`tool-button ${showDeprecated ? 'is-active' : ''}`}
+            type="button"
+            onClick={() => setShowDeprecated((value) => !value)}
+            aria-pressed={showDeprecated}
+          >
+            <EyeOff size={16} aria-hidden="true" />
+            Deprecated
+          </button>
+
+          <a className="tool-button" href="/gnmi_0.10.0_map.pdf" target="_blank" rel="noreferrer">
             <FileDown size={16} aria-hidden="true" />
             PDF
           </a>
@@ -197,7 +205,11 @@ function AppShell() {
           />
         </ReactFlow>
 
-        <Inspector node={selectedNode} totalNodes={mapNodes.length} totalEdges={mapEdges.length} />
+        <Inspector
+          node={selectedNode}
+          totalNodes={visibleMap.nodes.length}
+          totalEdges={visibleMap.edges.length}
+        />
       </main>
     </div>
   );
